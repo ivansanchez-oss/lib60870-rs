@@ -1,0 +1,20 @@
+[package]
+name = "lib60870"
+version = "0.1.0"
+edition = "2021"
+description = "IEC 60870-5-101/104 protocol implementation"
+license = "MIT"
+
+[features]
+tls = ["tokio-rustls"]
+
+[dependencies]
+bytes = "1"
+thiserror = "2"
+bitflags = "2"
+tracing = "0.1"
+tokio = { version = "1", features = ["net", "io-util", "time", "sync", "macros", "rt-multi-thread"] }
+tokio-rustls = { version = "0.26", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
