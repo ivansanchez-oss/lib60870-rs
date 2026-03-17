@@ -1,4 +1,6 @@
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use bytes::BytesMut;
 use tokio::io::{ReadHalf, WriteHalf};
@@ -12,11 +14,13 @@ use crate::transport::{connect_with_retry, Connector, PhysLayer};
 
 use super::{ClientCommand, ClientConfig, ClientHandler, ConnectionState};
 
-pub(super) struct ClientTask<C, H> {
+pub(super) struct ClientTask<C, H: ClientHandler> {
     connector: C,
     config: ClientConfig,
     handler: H,
+    param: H::Param,
     commands: mpsc::Receiver<ClientCommand>,
+    connected: Arc<AtomicBool>,
 }
 
 struct SessionState {
@@ -69,13 +73,17 @@ impl<C: Connector, H: ClientHandler> ClientTask<C, H> {
         connector: C,
         config: ClientConfig,
         handler: H,
+        param: H::Param,
         commands: mpsc::Receiver<ClientCommand>,
+        connected: Arc<AtomicBool>,
     ) -> Self {
         Self {
             connector,
             config,
             handler,
+            param,
             commands,
+            connected,
         }
     }
 
@@ -84,16 +92,21 @@ impl<C: Connector, H: ClientHandler> ClientTask<C, H> {
             connector,
             config,
             mut handler,
+            mut param,
             mut commands,
+            connected,
         } = self;
 
         loop {
             let phys = connect_with_retry(&connector, &config.retry).await;
-            handler.on_connection_state(ConnectionState::Connected);
+            connected.store(true, Ordering::Release);
+            handler.on_connection_state(ConnectionState::Connected, &mut param);
 
-            let result = run_session(&config, &mut handler, &mut commands, phys).await;
+            let result = run_session(&config, &mut handler, &mut param, &mut commands, phys).await;
 
-            handler.on_connection_state(ConnectionState::Disconnected);
+            connected.store(false, Ordering::Release);
+            handler.on_connection_state(ConnectionState::Disconnected, &mut param);
+            drain_pending_commands(&mut commands);
 
             match result {
                 Ok(SessionEnd::Shutdown) => return,
@@ -108,54 +121,144 @@ impl<C: Connector, H: ClientHandler> ClientTask<C, H> {
     }
 }
 
+/// Run the session: wait for STARTDT, then data transfer, loop on STOPDT.
 async fn run_session<H: ClientHandler>(
     config: &ClientConfig,
     handler: &mut H,
+    param: &mut H::Param,
     commands: &mut mpsc::Receiver<ClientCommand>,
     phys: PhysLayer,
 ) -> io::Result<SessionEnd> {
     let (mut reader, mut writer) = tokio::io::split(phys);
 
-    // Send STARTDT act
-    apci::write_apdu(&mut writer, &Apdu::U(UFunction::StartDtAct)).await?;
-
-    // Wait for STARTDT con within t0
-    let frame = time::timeout(config.apci.t0, apci::read_apdu(&mut reader))
-        .await
-        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "STARTDT con timeout (t0)"))??;
-
-    match frame {
-        Apdu::U(UFunction::StartDtCon) => {
-            info!("STARTDT confirmed");
+    loop {
+        // Wait for user to send STARTDT
+        if let Some(end) = wait_for_start_dt(config, commands, &mut reader, &mut writer).await? {
+            return Ok(end);
         }
-        other => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("expected STARTDT con, got {:?}", other),
-            ));
+
+        // Data transfer until STOPDT or error
+        let mut state = SessionState::new();
+        match run_data_transfer(
+            config,
+            handler,
+            param,
+            commands,
+            &mut reader,
+            &mut writer,
+            &mut state,
+        )
+        .await?
+        {
+            DataTransferEnd::Shutdown => return Ok(SessionEnd::Shutdown),
+            DataTransferEnd::Disconnected => return Ok(SessionEnd::Disconnected),
+            DataTransferEnd::Stopped => {
+                info!("data transfer stopped, waiting for STARTDT");
+                continue;
+            }
         }
     }
+}
 
-    let mut state = SessionState::new();
-    run_data_transfer(
-        config,
-        handler,
-        commands,
-        &mut reader,
-        &mut writer,
-        &mut state,
-    )
-    .await
+/// Returned by `run_data_transfer` to indicate why it exited.
+enum DataTransferEnd {
+    Shutdown,
+    Disconnected,
+    /// STOPDT completed — session returns to the stopped state.
+    Stopped,
+}
+
+/// Wait for the user to send a STARTDT command via the handle.
+///
+/// Returns `Ok(None)` when STARTDT succeeds (proceed to data transfer),
+/// or `Ok(Some(SessionEnd))` to exit the session.
+///
+/// Rejects SendAsdu/StopDt commands with appropriate errors. Responds to
+/// TESTFR from the server to keep the connection alive.
+async fn wait_for_start_dt(
+    config: &ClientConfig,
+    commands: &mut mpsc::Receiver<ClientCommand>,
+    reader: &mut ReadHalf<PhysLayer>,
+    writer: &mut WriteHalf<PhysLayer>,
+) -> io::Result<Option<SessionEnd>> {
+    loop {
+        tokio::select! {
+            frame_result = apci::read_apdu(reader) => {
+                let frame = frame_result?;
+                match frame {
+                    Apdu::U(UFunction::TestFrAct) => {
+                        apci::write_apdu(writer, &Apdu::U(UFunction::TestFrCon)).await?;
+                    }
+                    Apdu::U(UFunction::StopDtAct) => {
+                        apci::write_apdu(writer, &Apdu::U(UFunction::StopDtCon)).await?;
+                        return Ok(Some(SessionEnd::Disconnected));
+                    }
+                    other => {
+                        debug!(?other, "received frame while waiting for STARTDT command");
+                    }
+                }
+            }
+
+            cmd = commands.recv() => {
+                match cmd {
+                    Some(ClientCommand::StartDt { response }) => {
+                        apci::write_apdu(writer, &Apdu::U(UFunction::StartDtAct)).await?;
+
+                        let result = time::timeout(config.apci.t0, apci::read_apdu(reader))
+                            .await
+                            .map_err(|_| io::Error::new(
+                                io::ErrorKind::TimedOut,
+                                "STARTDT con timeout (t0)",
+                            ))?;
+
+                        match result? {
+                            Apdu::U(UFunction::StartDtCon) => {
+                                info!("STARTDT confirmed");
+                                let _ = response.send(Ok(()));
+                                return Ok(None);
+                            }
+                            other => {
+                                let err = io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    format!("expected STARTDT con, got {:?}", other),
+                                );
+                                let _ = response.send(Err(io::Error::new(err.kind(), err.to_string())));
+                                return Err(err);
+                            }
+                        }
+                    }
+                    Some(ClientCommand::StopDt { response }) => {
+                        let _ = response.send(Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "data transfer not active",
+                        )));
+                    }
+                    Some(ClientCommand::SendAsdu { response, .. }) => {
+                        let _ = response.send(Err(io::Error::new(
+                            io::ErrorKind::NotConnected,
+                            "data transfer not active, call start_dt() first",
+                        )));
+                    }
+                    Some(ClientCommand::Shutdown { response }) => {
+                        let _ = response.send(());
+                        return Ok(Some(SessionEnd::Shutdown));
+                    }
+                    None => return Ok(Some(SessionEnd::Shutdown)),
+                }
+            }
+        }
+    }
 }
 
 async fn run_data_transfer<H: ClientHandler>(
     config: &ClientConfig,
     handler: &mut H,
+    param: &mut H::Param,
     commands: &mut mpsc::Receiver<ClientCommand>,
     reader: &mut ReadHalf<PhysLayer>,
     writer: &mut WriteHalf<PhysLayer>,
     state: &mut SessionState,
-) -> io::Result<SessionEnd> {
+) -> io::Result<DataTransferEnd> {
     let apci_params = &config.apci;
 
     loop {
@@ -183,7 +286,7 @@ async fn run_data_transfer<H: ClientHandler>(
                         process_ack(state, recv_seq);
 
                         match Asdu::decode(&mut payload, &config.app) {
-                            Ok(asdu) => handler.on_asdu(&asdu),
+                            Ok(asdu) => handler.on_asdu(&asdu, param),
                             Err(e) => warn!(?e, "failed to decode ASDU"),
                         }
 
@@ -208,7 +311,6 @@ async fn run_data_transfer<H: ClientHandler>(
                     Apdu::U(UFunction::TestFrCon) => {
                         if state.testfr_pending {
                             state.testfr_pending = false;
-                            // Clear t1 if no unconfirmed I-frames either
                             if state.unconfirmed_count() == 0 {
                                 state.t1_deadline = None;
                             }
@@ -217,7 +319,7 @@ async fn run_data_transfer<H: ClientHandler>(
 
                     Apdu::U(UFunction::StopDtAct) => {
                         apci::write_apdu(writer, &Apdu::U(UFunction::StopDtCon)).await?;
-                        return Ok(SessionEnd::Disconnected);
+                        return Ok(DataTransferEnd::Stopped);
                     }
 
                     Apdu::U(func) => {
@@ -229,6 +331,47 @@ async fn run_data_transfer<H: ClientHandler>(
             // --- User command ---
             cmd = commands.recv() => {
                 match cmd {
+                    Some(ClientCommand::StartDt { response }) => {
+                        let _ = response.send(Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "data transfer already active",
+                        )));
+                    }
+                    Some(ClientCommand::StopDt { response }) => {
+                        let result = apci::write_apdu(writer, &Apdu::U(UFunction::StopDtAct)).await;
+                        if let Err(e) = result {
+                            let _ = response.send(Err(e));
+                            return Ok(DataTransferEnd::Disconnected);
+                        }
+                        // Wait for STOPDT con within t0
+                        match time::timeout(config.apci.t0, apci::read_apdu(reader)).await {
+                            Ok(Ok(Apdu::U(UFunction::StopDtCon))) => {
+                                info!("STOPDT confirmed");
+                                let _ = response.send(Ok(()));
+                                return Ok(DataTransferEnd::Stopped);
+                            }
+                            Ok(Ok(other)) => {
+                                let err = io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    format!("expected STOPDT con, got {:?}", other),
+                                );
+                                let _ = response.send(Err(io::Error::new(err.kind(), err.to_string())));
+                                return Err(err);
+                            }
+                            Ok(Err(e)) => {
+                                let _ = response.send(Err(io::Error::new(e.kind(), e.to_string())));
+                                return Err(e);
+                            }
+                            Err(_) => {
+                                let err = io::Error::new(
+                                    io::ErrorKind::TimedOut,
+                                    "STOPDT con timeout (t0)",
+                                );
+                                let _ = response.send(Err(io::Error::new(err.kind(), err.to_string())));
+                                return Err(err);
+                            }
+                        }
+                    }
                     Some(ClientCommand::SendAsdu { asdu, response }) => {
                         let result = send_i_frame(config, writer, state, &asdu).await;
                         let _ = response.send(result);
@@ -236,16 +379,15 @@ async fn run_data_transfer<H: ClientHandler>(
                     Some(ClientCommand::Shutdown { response }) => {
                         let _ = apci::write_apdu(writer, &Apdu::U(UFunction::StopDtAct)).await;
                         let _ = response.send(());
-                        return Ok(SessionEnd::Shutdown);
+                        return Ok(DataTransferEnd::Shutdown);
                     }
                     None => {
-                        // All handles dropped
-                        return Ok(SessionEnd::Shutdown);
+                        return Ok(DataTransferEnd::Shutdown);
                     }
                 }
             }
 
-            // --- t1 timeout: ack or TESTFR con not received ---
+            // --- t1 timeout ---
             _ = async {
                 match state.t1_deadline {
                     Some(deadline) => time::sleep_until(deadline).await,
@@ -258,7 +400,7 @@ async fn run_data_transfer<H: ClientHandler>(
                 ));
             }
 
-            // --- t2 timeout: send S-frame ack ---
+            // --- t2 timeout ---
             _ = async {
                 match state.t2_deadline {
                     Some(deadline) => time::sleep_until(deadline).await,
@@ -268,14 +410,13 @@ async fn run_data_transfer<H: ClientHandler>(
                 send_s_frame(writer, state).await?;
             }
 
-            // --- t3 timeout: send TESTFR ---
+            // --- t3 timeout ---
             _ = time::sleep_until(t3_deadline) => {
                 if !state.testfr_pending {
                     apci::write_apdu(writer, &Apdu::U(UFunction::TestFrAct)).await?;
                     state.last_tx = Instant::now();
                     state.testfr_pending = true;
 
-                    // Expect TESTFR con within t1
                     if state.t1_deadline.is_none() {
                         state.t1_deadline = Some(Instant::now() + apci_params.t1);
                     }
@@ -307,6 +448,32 @@ async fn send_s_frame(
     state.unacked_recv = 0;
     state.t2_deadline = None;
     Ok(())
+}
+
+/// Drain all pending commands from the channel, responding with errors.
+///
+/// Called after a session ends so that callers waiting on `send_asdu`
+/// get an immediate error instead of hanging until the next reconnect.
+fn drain_pending_commands(commands: &mut mpsc::Receiver<ClientCommand>) {
+    let not_connected = || {
+        io::Error::new(
+            io::ErrorKind::NotConnected,
+            "disconnected while command was pending",
+        )
+    };
+    while let Ok(cmd) = commands.try_recv() {
+        match cmd {
+            ClientCommand::StartDt { response } | ClientCommand::StopDt { response } => {
+                let _ = response.send(Err(not_connected()));
+            }
+            ClientCommand::SendAsdu { response, .. } => {
+                let _ = response.send(Err(not_connected()));
+            }
+            ClientCommand::Shutdown { response } => {
+                let _ = response.send(());
+            }
+        }
+    }
 }
 
 async fn send_i_frame(

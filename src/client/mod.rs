@@ -1,6 +1,8 @@
 mod task;
 
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot};
 
@@ -31,12 +33,19 @@ pub enum ConnectionState {
 }
 
 /// Trait for receiving events from the 104 client session.
+///
+/// The associated type [`Param`](ClientHandler::Param) allows passing
+/// user-defined context to every callback. Use `()` if no extra context
+/// is needed.
 pub trait ClientHandler: Send + 'static {
+    /// User-defined parameter passed to every callback.
+    type Param: Send;
+
     /// Called when the transport connection state changes.
-    fn on_connection_state(&mut self, state: ConnectionState);
+    fn on_connection_state(&mut self, state: ConnectionState, param: &mut Self::Param);
 
     /// Called for each ASDU received from the server (spontaneous, interrogation responses, etc.).
-    fn on_asdu(&mut self, asdu: &Asdu);
+    fn on_asdu(&mut self, asdu: &Asdu, param: &mut Self::Param);
 }
 
 /// Protocol-level configuration for a 104 client.
@@ -61,12 +70,22 @@ impl Default for ClientConfig {
 ///
 /// Lightweight and cloneable. All methods are async and wait until the
 /// command is enqueued into the send window (backpressure if window is full).
+///
+/// Sending commands while disconnected returns [`Error::NotConnected`]
+/// immediately, matching the behavior of the C lib60870.
 #[derive(Clone)]
 pub struct ClientHandle {
     tx: mpsc::Sender<ClientCommand>,
+    connected: Arc<AtomicBool>,
 }
 
 pub(crate) enum ClientCommand {
+    StartDt {
+        response: oneshot::Sender<Result<(), io::Error>>,
+    },
+    StopDt {
+        response: oneshot::Sender<Result<(), io::Error>>,
+    },
     SendAsdu {
         asdu: Asdu,
         response: oneshot::Sender<Result<(), io::Error>>,
@@ -77,6 +96,40 @@ pub(crate) enum ClientCommand {
 }
 
 impl ClientHandle {
+    /// Returns `true` if the client session is currently connected.
+    pub fn is_connected(&self) -> bool {
+        self.connected.load(Ordering::Acquire)
+    }
+
+    /// Send STARTDT activation to begin data transfer.
+    ///
+    /// Must be called after the transport connects before sending any ASDUs.
+    pub async fn start_dt(&self) -> Result<(), Error> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(ClientCommand::StartDt { response: tx })
+            .await
+            .map_err(|_| Error::Connection("client task closed".into()))?;
+        rx.await
+            .map_err(|_| Error::Connection("client task closed".into()))?
+            .map_err(Error::Io)
+    }
+
+    /// Send STOPDT activation to pause data transfer.
+    ///
+    /// After this, the connection remains open but no I-frames are exchanged
+    /// until [`start_dt()`](ClientHandle::start_dt) is called again.
+    pub async fn stop_dt(&self) -> Result<(), Error> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(ClientCommand::StopDt { response: tx })
+            .await
+            .map_err(|_| Error::Connection("client task closed".into()))?;
+        rx.await
+            .map_err(|_| Error::Connection("client task closed".into()))?
+            .map_err(Error::Io)
+    }
+
     /// Send a station interrogation command.
     pub async fn interrogation(&self, ca: u16, qoi: u8) -> Result<(), Error> {
         let asdu = AsduBuilder::new(CauseOfTransmission::Activation, ca)
@@ -135,6 +188,9 @@ impl ClientHandle {
     }
 
     async fn send_asdu(&self, asdu: Asdu) -> Result<(), Error> {
+        if !self.connected.load(Ordering::Acquire) {
+            return Err(Error::NotConnected);
+        }
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(ClientCommand::SendAsdu { asdu, response: tx })
@@ -165,21 +221,28 @@ pub enum TransportConfig {
 
 /// Entry point for creating a 104 client session.
 ///
-/// Bundles transport, protocol configuration, and handler into a single
-/// object. Call [`run()`](Client104::run) to spawn the async task and
-/// obtain a [`ClientHandle`].
-pub struct Client104<H> {
+/// Bundles transport, protocol configuration, handler and user parameter
+/// into a single object. Call [`run()`](Client104::run) to spawn the
+/// async task and obtain a [`ClientHandle`].
+pub struct Client104<H: ClientHandler> {
     transport: TransportConfig,
     config: ClientConfig,
     handler: H,
+    param: H::Param,
 }
 
 impl<H: ClientHandler> Client104<H> {
-    pub fn new(transport: TransportConfig, config: ClientConfig, handler: H) -> Self {
+    pub fn new(
+        transport: TransportConfig,
+        config: ClientConfig,
+        handler: H,
+        param: H::Param,
+    ) -> Self {
         Self {
             transport,
             config,
             handler,
+            param,
         }
     }
 
@@ -190,30 +253,60 @@ impl<H: ClientHandler> Client104<H> {
     /// configured [`RetryStrategy`].
     pub fn run(self) -> ClientHandle {
         let (tx, rx) = mpsc::channel(64);
+        let connected = Arc::new(AtomicBool::new(false));
+        let connected_flag = connected.clone();
         match self.transport {
             TransportConfig::Tcp(cfg) => {
                 let connector = TcpConnector::new(cfg);
-                let t = task::ClientTask::new(connector, self.config, self.handler, rx);
+                let t = task::ClientTask::new(
+                    connector,
+                    self.config,
+                    self.handler,
+                    self.param,
+                    rx,
+                    connected_flag,
+                );
                 tokio::spawn(t.run());
             }
             #[cfg(feature = "tls")]
             TransportConfig::Tls(cfg) => {
                 let connector = TlsConnector::new(cfg);
-                let t = task::ClientTask::new(connector, self.config, self.handler, rx);
+                let t = task::ClientTask::new(
+                    connector,
+                    self.config,
+                    self.handler,
+                    self.param,
+                    rx,
+                    connected_flag,
+                );
                 tokio::spawn(t.run());
             }
             TransportConfig::SerialOverTcp(cfg) => {
                 let connector = SerialOverTcpConnector::new(cfg);
-                let t = task::ClientTask::new(connector, self.config, self.handler, rx);
+                let t = task::ClientTask::new(
+                    connector,
+                    self.config,
+                    self.handler,
+                    self.param,
+                    rx,
+                    connected_flag,
+                );
                 tokio::spawn(t.run());
             }
             #[cfg(feature = "serial")]
             TransportConfig::Serial(cfg) => {
                 let connector = SerialConnector::new(cfg);
-                let t = task::ClientTask::new(connector, self.config, self.handler, rx);
+                let t = task::ClientTask::new(
+                    connector,
+                    self.config,
+                    self.handler,
+                    self.param,
+                    rx,
+                    connected_flag,
+                );
                 tokio::spawn(t.run());
             }
         }
-        ClientHandle { tx }
+        ClientHandle { tx, connected }
     }
 }

@@ -11,6 +11,9 @@ pub enum Error {
     #[error("connection error: {0}")]
     Connection(String),
 
+    #[error("not connected")]
+    NotConnected,
+
     #[error("protocol error: {0}")]
     Protocol(String),
 
