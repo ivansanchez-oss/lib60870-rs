@@ -24,6 +24,16 @@ Enable TLS:
 lib60870 = { version = "0.1", features = ["tls"] }
 ```
 
+## Design Decisions
+
+### Sequence flag (SQ) is an encoding detail
+
+The IEC 60870-5 wire format supports two layouts for information objects within an ASDU:
+- **SQ=0**: each object carries its own Information Object Address (IOA)
+- **SQ=1**: only the first object has an IOA; subsequent IOAs are implied as sequential (base + 1, base + 2, ...)
+
+In lib60870-rs, SQ is treated as a **wire-format detail transparent to the user**. The `Asdu` struct always stores explicit `(IOA, object)` pairs regardless of SQ mode. During decoding, SQ=1 frames have their sequential addresses computed automatically. During encoding, if `is_sequence` is set, the encoder validates that IOAs are consecutive and emits the compact SQ=1 format.
+
 ## License
 
 MIT
