@@ -289,7 +289,7 @@ impl Cp56Time2a {
     }
 
     pub fn set_year(&mut self, value: u8) {
-        self.bytes[6] = (self.bytes[6] & 0x80) | (value % 100 & 0x7f);
+        self.bytes[6] = (self.bytes[6] & 0x80) | ((value % 100) & 0x7f);
     }
 }
 
