@@ -1,7 +1,6 @@
 pub mod ioa;
 pub mod header;
 pub mod builder;
-pub mod handler;
 
 use bytes::{Buf, BufMut};
 
@@ -10,7 +9,6 @@ use crate::info::InformationObject;
 use crate::types::AppLayerParameters;
 
 pub use builder::AsduBuilder;
-pub use handler::AsduHandler;
 pub use header::AsduHeader;
 pub use ioa::InformationObjectAddress;
 
