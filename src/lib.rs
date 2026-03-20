@@ -2,6 +2,7 @@ pub mod apci;
 pub mod asdu;
 pub mod client;
 pub mod error;
+pub mod ft12;
 pub mod info;
 pub mod transport;
 pub mod types;

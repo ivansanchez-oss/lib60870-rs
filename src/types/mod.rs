@@ -6,6 +6,7 @@ pub mod app_layer_params;
 pub mod apci_params;
 pub mod common_address;
 pub mod originator_address;
+pub mod link_layer_params;
 
 pub use type_id::TypeId;
 pub use cause_of_transmission::CauseOfTransmission;
@@ -15,3 +16,4 @@ pub use app_layer_params::AppLayerParameters;
 pub use apci_params::ApciParameters;
 pub use common_address::CommonAddress;
 pub use originator_address::OriginatorAddress;
+pub use link_layer_params::LinkLayerParameters;

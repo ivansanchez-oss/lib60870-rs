@@ -52,6 +52,30 @@ pub enum AduError {
 #[error("IOA value {0:#X} exceeds maximum 0xFFFFFF")]
 pub struct IoaOverflow(pub u32);
 
+// --- Link layer (FT 1.2) ---
+
+#[derive(Debug, thiserror::Error)]
+pub enum LinkError {
+    #[error("invalid start byte 0x{0:02X}")]
+    InvalidStartByte(u8),
+    #[error("invalid end byte 0x{0:02X}, expected 0x16")]
+    InvalidEndByte(u8),
+    #[error("checksum mismatch: expected 0x{expected:02X}, got 0x{got:02X}")]
+    ChecksumMismatch { expected: u8, got: u8 },
+    #[error("length field mismatch: L1={l1}, L2={l2}")]
+    LengthMismatch { l1: u8, l2: u8 },
+    #[error("frame length too short: {0}")]
+    LengthTooShort(usize),
+    #[error("frame length exceeded maximum: {0}")]
+    LengthExceeded(usize),
+    #[error("unknown primary function code: {0}")]
+    UnknownPrimaryFunction(u8),
+    #[error("unknown secondary function code: {0}")]
+    UnknownSecondaryFunction(u8),
+    #[error(transparent)]
+    Io(#[from] io::Error),
+}
+
 // --- Configuration errors ---
 
 #[derive(Debug, thiserror::Error)]
@@ -74,6 +98,8 @@ pub enum ConfigError {
     InvalidSizeOfIoa(u8),
     #[error("max_asdu_length ({max}) must be >= header size ({min})")]
     MaxAsduLengthTooSmall { max: u16, min: u16 },
+    #[error("link_addr_size must be 1 or 2, got {0}")]
+    InvalidLinkAddrSize(u8),
 }
 
 // --- Client request errors ---
@@ -98,8 +124,14 @@ pub enum RequestError {
     NotActive,
     #[error("data transfer already active")]
     AlreadyActive,
+    #[error("link reset failed")]
+    LinkResetFailed,
+    #[error("link layer NACK")]
+    LinkNack,
     #[error(transparent)]
     Frame(#[from] FrameError),
+    #[error(transparent)]
+    Link(#[from] LinkError),
     #[error(transparent)]
     Adu(#[from] AduError),
     #[error(transparent)]

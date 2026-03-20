@@ -432,7 +432,7 @@ async fn send_s_frame(
 ///
 /// Called after a session ends so that callers waiting on `send_asdu`
 /// get an immediate error instead of hanging until the next reconnect.
-fn drain_pending_commands(commands: &mut mpsc::Receiver<ClientCommand>) {
+pub(super) fn drain_pending_commands(commands: &mut mpsc::Receiver<ClientCommand>) {
     while let Ok(cmd) = commands.try_recv() {
         match cmd {
             ClientCommand::StartDt { promise } | ClientCommand::StopDt { promise } => {

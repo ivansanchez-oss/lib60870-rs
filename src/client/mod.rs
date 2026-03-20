@@ -1,4 +1,5 @@
 mod task;
+mod task101;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -7,6 +8,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::asdu::{Asdu, AsduBuilder, InformationObjectAddress};
 use crate::error::RequestError;
+use crate::ft12::LinkAddress;
 use crate::info::{
     ClockSyncCommand, CounterInterrogationCommand, InformationObject, InterrogationCommand,
     ReadCommand,
@@ -18,6 +20,7 @@ use crate::transport::{
 
 use crate::types::{
     ApciParameters, AppLayerParameters, CauseOfTransmission, CommonAddress, Cp56Time2a,
+    LinkLayerParameters,
 };
 
 #[cfg(feature = "tls")]
@@ -323,6 +326,106 @@ impl<H: ClientHandler> Client104<H> {
             TransportConfig::Serial(cfg) => {
                 let connector = SerialConnector::new(cfg);
                 let t = task::ClientTask::new(
+                    connector,
+                    self.config,
+                    self.handler,
+                    self.param,
+                    rx,
+                    connected_flag,
+                );
+                tokio::spawn(t.run());
+            }
+        }
+        ClientHandle { tx, connected }
+    }
+}
+
+// --- CS101 Client ---
+
+/// Transport configuration for the 101 client.
+///
+/// CS101 uses serial or serial-over-TCP links with FT 1.2 framing.
+pub enum TransportConfig101 {
+    /// Serial-over-TCP transport (raw TCP with FT 1.2 framing).
+    SerialOverTcp(SerialOverTcpConfig),
+    /// Native serial port transport.
+    #[cfg(feature = "serial")]
+    Serial(SerialConfig),
+}
+
+/// Protocol-level configuration for a 101 client.
+#[derive(Debug, Clone)]
+pub struct Client101Config {
+    pub link: LinkLayerParameters,
+    pub app: AppLayerParameters,
+    pub retry: RetryStrategy,
+    pub link_address: LinkAddress,
+}
+
+impl Default for Client101Config {
+    fn default() -> Self {
+        Self {
+            link: LinkLayerParameters::default(),
+            app: AppLayerParameters::CS101_DEFAULT,
+            retry: RetryStrategy::default(),
+            link_address: LinkAddress(1),
+        }
+    }
+}
+
+/// Entry point for creating a 101 client session.
+///
+/// Bundles transport, protocol configuration, handler and user parameter
+/// into a single object. Call [`run()`](Client101::run) to spawn the
+/// async task and obtain a [`ClientHandle`].
+pub struct Client101<H: ClientHandler> {
+    transport: TransportConfig101,
+    config: Client101Config,
+    handler: H,
+    param: H::Param,
+}
+
+impl<H: ClientHandler> Client101<H> {
+    pub fn new(
+        transport: TransportConfig101,
+        config: Client101Config,
+        handler: H,
+        param: H::Param,
+    ) -> Self {
+        Self {
+            transport,
+            config,
+            handler,
+            param,
+        }
+    }
+
+    /// Spawn the client task and return a handle for sending commands.
+    ///
+    /// The task connects using the configured transport, manages FT 1.2 link
+    /// layer, and delivers ASDUs to the handler. It reconnects automatically
+    /// using the configured [`RetryStrategy`].
+    pub fn run(self) -> ClientHandle {
+        let (tx, rx) = mpsc::channel(64);
+        let connected = Arc::new(AtomicBool::new(false));
+        let connected_flag = connected.clone();
+        match self.transport {
+            TransportConfig101::SerialOverTcp(cfg) => {
+                let connector = SerialOverTcpConnector::new(cfg);
+                let t = task101::Client101Task::new(
+                    connector,
+                    self.config,
+                    self.handler,
+                    self.param,
+                    rx,
+                    connected_flag,
+                );
+                tokio::spawn(t.run());
+            }
+            #[cfg(feature = "serial")]
+            TransportConfig101::Serial(cfg) => {
+                let connector = SerialConnector::new(cfg);
+                let t = task101::Client101Task::new(
                     connector,
                     self.config,
                     self.handler,
