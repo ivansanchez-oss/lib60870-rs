@@ -204,7 +204,7 @@ async fn wait_for_start_dt(
                     Some(ClientCommand::StartDt { response }) => {
                         apci::write_apdu(writer, &Apdu::U(UFunction::StartDtAct)).await?;
 
-                        let result = time::timeout(config.apci.t0, apci::read_apdu(reader))
+                        let result = time::timeout(config.apci.t0(), apci::read_apdu(reader))
                             .await
                             .map_err(|_| io::Error::new(
                                 io::ErrorKind::TimedOut,
@@ -262,7 +262,7 @@ async fn run_data_transfer<H: ClientHandler>(
     let apci_params = &config.apci;
 
     loop {
-        let t3_deadline = state.last_tx.max(state.last_rx) + apci_params.t3;
+        let t3_deadline = state.last_tx.max(state.last_rx) + apci_params.t3();
 
         tokio::select! {
             // --- Incoming frame ---
@@ -292,10 +292,10 @@ async fn run_data_transfer<H: ClientHandler>(
 
                         state.unacked_recv += 1;
 
-                        if state.unacked_recv >= apci_params.w {
+                        if state.unacked_recv >= apci_params.w() {
                             send_s_frame(writer, state).await?;
                         } else if state.t2_deadline.is_none() {
-                            state.t2_deadline = Some(Instant::now() + apci_params.t2);
+                            state.t2_deadline = Some(Instant::now() + apci_params.t2());
                         }
                     }
 
@@ -344,7 +344,7 @@ async fn run_data_transfer<H: ClientHandler>(
                             return Ok(DataTransferEnd::Disconnected);
                         }
                         // Wait for STOPDT con within t0
-                        match time::timeout(config.apci.t0, apci::read_apdu(reader)).await {
+                        match time::timeout(config.apci.t0(), apci::read_apdu(reader)).await {
                             Ok(Ok(Apdu::U(UFunction::StopDtCon))) => {
                                 info!("STOPDT confirmed");
                                 let _ = response.send(Ok(()));
@@ -418,7 +418,7 @@ async fn run_data_transfer<H: ClientHandler>(
                     state.testfr_pending = true;
 
                     if state.t1_deadline.is_none() {
-                        state.t1_deadline = Some(Instant::now() + apci_params.t1);
+                        state.t1_deadline = Some(Instant::now() + apci_params.t1());
                     }
                 }
             }
@@ -482,7 +482,7 @@ async fn send_i_frame(
     state: &mut SessionState,
     asdu: &Asdu,
 ) -> io::Result<()> {
-    if state.unconfirmed_count() >= config.apci.k {
+    if state.unconfirmed_count() >= config.apci.k() {
         return Err(io::Error::new(
             io::ErrorKind::WouldBlock,
             "send window full (k)",
@@ -509,7 +509,7 @@ async fn send_i_frame(
 
     // Set t1 if this is the first unconfirmed
     if state.t1_deadline.is_none() {
-        state.t1_deadline = Some(Instant::now() + config.apci.t1);
+        state.t1_deadline = Some(Instant::now() + config.apci.t1());
     }
 
     Ok(())

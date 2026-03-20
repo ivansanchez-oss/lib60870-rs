@@ -3,7 +3,7 @@ use std::time::Duration;
 use lib60870::asdu::Asdu;
 use lib60870::client::{Client104, ClientConfig, ClientHandler, ConnectionState, TransportConfig};
 use lib60870::transport::{RetryStrategy, TcpConfig};
-use lib60870::types::{ApciParameters, AppLayerParameters};
+use lib60870::types::{ApciParameters, AppLayerParameters, CommonAddress, OriginatorAddress};
 use tracing::{error, info};
 
 struct CustomHandler;
@@ -27,7 +27,7 @@ impl ClientHandler for CustomHandler {
         );
 
         for obj in &asdu.objects {
-            info!("  IOA {}: {:?}", obj.address.value(), obj.object);
+            info!("  IOA {}: {:?}", obj.address.value(), obj.value);
         }
     }
 }
@@ -39,21 +39,25 @@ async fn main() {
     let addr = "192.168.101.3:2404".parse().unwrap();
 
     let config = ClientConfig {
-        apci: ApciParameters {
-            k: 12,
-            w: 8,
-            t0: Duration::from_secs(10),
-            t1: Duration::from_secs(15),
-            t2: Duration::from_secs(10),
-            t3: Duration::from_secs(20),
-        },
-        app: AppLayerParameters {
-            size_of_cot: 2,
-            size_of_ca: 2,
-            size_of_ioa: 3,
-            max_asdu_length: 249,
-            originator_address: 0,
-        },
+        apci: ApciParameters::builder()
+            .k(12)
+            .w(8)
+            .t0(Duration::from_secs(10))
+            .t1(Duration::from_secs(15))
+            .t2(Duration::from_secs(10))
+            .t3(Duration::from_secs(20))
+            .build()
+            .expect("Invalid APCI parameters"),
+
+        app: AppLayerParameters::builder()
+            .size_of_cot(2)
+            .size_of_ca(2)
+            .size_of_ioa(3)
+            .max_asdu_length(249)
+            .originator_address(OriginatorAddress::new(0))
+            .build()
+            .expect("Invalid APP parameters"),
+
         retry: RetryStrategy {
             min_delay: Duration::from_secs(1),
             max_delay: Duration::from_secs(30),
@@ -79,7 +83,7 @@ async fn main() {
     }
 
     // Send a station interrogation to common address 1
-    if let Err(e) = handle.interrogation(1, 20).await {
+    if let Err(e) = handle.interrogation(CommonAddress::new(1), 20).await {
         error!("Interrogation error: {e}");
     }
 

@@ -1,30 +1,30 @@
 use crate::error::{Error, Result};
-use crate::types::CauseOfTransmission;
+use crate::types::{CauseOfTransmission, CommonAddress, OriginatorAddress};
 use crate::info::InformationObject;
 
 use super::header::AsduHeader;
 use super::ioa::InformationObjectAddress;
-use super::{AddressedObject, Asdu};
+use super::{Indexed, Asdu};
 
 /// Fluent builder for constructing validated ASDUs.
 pub struct AsduBuilder {
     cause: CauseOfTransmission,
-    common_address: u16,
+    common_address: CommonAddress,
     is_test: bool,
     is_negative: bool,
-    originator_address: u8,
+    originator_address: OriginatorAddress,
     is_sequence: bool,
-    objects: Vec<AddressedObject>,
+    objects: Vec<Indexed<InformationObject>>,
 }
 
 impl AsduBuilder {
-    pub fn new(cause: CauseOfTransmission, common_address: u16) -> Self {
+    pub fn new(cause: CauseOfTransmission, common_address: CommonAddress) -> Self {
         Self {
             cause,
             common_address,
             is_test: false,
             is_negative: false,
-            originator_address: 0,
+            originator_address: OriginatorAddress::default(),
             is_sequence: false,
             objects: Vec::new(),
         }
@@ -40,7 +40,7 @@ impl AsduBuilder {
         self
     }
 
-    pub fn originator(mut self, addr: u8) -> Self {
+    pub fn originator(mut self, addr: OriginatorAddress) -> Self {
         self.originator_address = addr;
         self
     }
@@ -63,18 +63,18 @@ impl AsduBuilder {
         }
 
         if let Some(first) = self.objects.first() {
-            if first.object.type_id() != object.type_id() {
+            if first.value.type_id() != object.type_id() {
                 return Err(Error::Encode(format!(
                     "type mismatch: expected {}, got {}",
-                    first.object.type_id(),
+                    first.value.type_id(),
                     object.type_id()
                 )));
             }
         }
 
-        self.objects.push(AddressedObject {
+        self.objects.push(Indexed {
             address: ioa.into(),
-            object,
+            value: object,
         });
         Ok(self)
     }
@@ -85,7 +85,7 @@ impl AsduBuilder {
             return Err(Error::Encode("ASDU must contain at least one object".into()));
         }
 
-        let type_id = self.objects[0].object.type_id();
+        let type_id = self.objects[0].value.type_id();
 
         Ok(Asdu {
             header: AsduHeader {
@@ -115,10 +115,10 @@ mod tests {
 
     #[test]
     fn build_simple() {
-        let asdu = AsduBuilder::new(CauseOfTransmission::Spontaneous, 1)
-            .add(100u32, spi(true))
+        let asdu = AsduBuilder::new(CauseOfTransmission::Spontaneous, CommonAddress::new(1))
+            .add(100u16, spi(true))
             .unwrap()
-            .add(101u32, spi(false))
+            .add(101u16, spi(false))
             .unwrap()
             .build()
             .unwrap();
@@ -131,11 +131,11 @@ mod tests {
 
     #[test]
     fn build_sequential() {
-        let asdu = AsduBuilder::new(CauseOfTransmission::Spontaneous, 1)
+        let asdu = AsduBuilder::new(CauseOfTransmission::Spontaneous, CommonAddress::new(1))
             .sequential(true)
-            .add(100u32, spi(true))
+            .add(100u16, spi(true))
             .unwrap()
-            .add(101u32, spi(false))
+            .add(101u16, spi(false))
             .unwrap()
             .build()
             .unwrap();
@@ -145,11 +145,11 @@ mod tests {
 
     #[test]
     fn type_mismatch() {
-        let result = AsduBuilder::new(CauseOfTransmission::Spontaneous, 1)
-            .add(100u32, spi(true))
+        let result = AsduBuilder::new(CauseOfTransmission::Spontaneous, CommonAddress::new(1))
+            .add(100u16, spi(true))
             .unwrap()
             .add(
-                101u32,
+                101u16,
                 InformationObject::Interrogation(
                     crate::info::InterrogationCommand::station(),
                 ),
@@ -160,34 +160,34 @@ mod tests {
 
     #[test]
     fn build_empty() {
-        let result = AsduBuilder::new(CauseOfTransmission::Spontaneous, 1).build();
+        let result = AsduBuilder::new(CauseOfTransmission::Spontaneous, CommonAddress::new(1)).build();
         assert!(result.is_err());
     }
 
     #[test]
     fn overflow_127() {
-        let mut builder = AsduBuilder::new(CauseOfTransmission::Spontaneous, 1);
-        for i in 0..127u32 {
+        let mut builder = AsduBuilder::new(CauseOfTransmission::Spontaneous, CommonAddress::new(1));
+        for i in 0..127u16 {
             builder = builder.add(i, spi(true)).unwrap();
         }
-        let result = builder.add(127u32, spi(true));
+        let result = builder.add(127u16, spi(true));
         assert!(result.is_err());
     }
 
     #[test]
     fn builder_flags() {
-        let asdu = AsduBuilder::new(CauseOfTransmission::Activation, 0x1234)
+        let asdu = AsduBuilder::new(CauseOfTransmission::Activation, CommonAddress::new(0x1234))
             .test(true)
             .negative(true)
-            .originator(42)
-            .add(1u32, spi(true))
+            .originator(OriginatorAddress::new(42))
+            .add(1u16, spi(true))
             .unwrap()
             .build()
             .unwrap();
 
         assert!(asdu.header.is_test);
         assert!(asdu.header.is_negative);
-        assert_eq!(asdu.header.originator_address, 42);
-        assert_eq!(asdu.header.common_address, 0x1234);
+        assert_eq!(asdu.header.originator_address, OriginatorAddress::new(42));
+        assert_eq!(asdu.header.common_address, CommonAddress::new(0x1234));
     }
 }

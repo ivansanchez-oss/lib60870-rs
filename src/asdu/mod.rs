@@ -12,11 +12,14 @@ pub use builder::AsduBuilder;
 pub use header::AsduHeader;
 pub use ioa::InformationObjectAddress;
 
-/// An information object together with its address.
+/// An information object paired with its address.
+///
+/// Generic over the object type `T`, allowing use with both the
+/// [`InformationObject`] enum and specific typed objects.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct AddressedObject {
+pub struct Indexed<T> {
     pub address: InformationObjectAddress,
-    pub object: InformationObject,
+    pub value: T,
 }
 
 /// Application Service Data Unit — header plus a collection of addressed
@@ -24,7 +27,7 @@ pub struct AddressedObject {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Asdu {
     pub header: AsduHeader,
-    pub objects: Vec<AddressedObject>,
+    pub objects: Vec<Indexed<InformationObject>>,
 }
 
 impl Asdu {
@@ -39,29 +42,29 @@ impl Asdu {
             if n == 0 {
                 return Ok(Self { header, objects });
             }
-            let base_ioa = InformationObjectAddress::decode(buf, params.size_of_ioa)?;
+            let base_ioa = InformationObjectAddress::decode(buf, params.size_of_ioa())?;
             let first = InformationObject::decode(header.type_id, buf)?;
-            objects.push(AddressedObject {
+            objects.push(Indexed {
                 address: base_ioa,
-                object: first,
+                value: first,
             });
             for i in 1..n {
                 let ioa =
-                    InformationObjectAddress::new(base_ioa.value() + i as u32);
+                    InformationObjectAddress::try_new(base_ioa.value() + i as u32)?;
                 let obj = InformationObject::decode(header.type_id, buf)?;
-                objects.push(AddressedObject {
+                objects.push(Indexed {
                     address: ioa,
-                    object: obj,
+                    value: obj,
                 });
             }
         } else {
             // SQ=0: each object has its own IOA
             for _ in 0..n {
-                let ioa = InformationObjectAddress::decode(buf, params.size_of_ioa)?;
+                let ioa = InformationObjectAddress::decode(buf, params.size_of_ioa())?;
                 let obj = InformationObject::decode(header.type_id, buf)?;
-                objects.push(AddressedObject {
+                objects.push(Indexed {
                     address: ioa,
-                    object: obj,
+                    value: obj,
                 });
             }
         }
@@ -73,10 +76,10 @@ impl Asdu {
     pub fn encode(&self, buf: &mut impl BufMut, params: &AppLayerParameters) -> Result<()> {
         // Validate: all objects must have the same type_id as the header
         for ao in &self.objects {
-            if ao.object.type_id() != self.header.type_id {
+            if ao.value.type_id() != self.header.type_id {
                 return Err(Error::Encode(format!(
                     "object type {} does not match header type {}",
-                    ao.object.type_id(),
+                    ao.value.type_id(),
                     self.header.type_id
                 )));
             }
@@ -84,10 +87,10 @@ impl Asdu {
 
         // Validate: total encoded size must not exceed max_asdu_length
         let total = self.encoded_size(params);
-        if total > params.max_asdu_length as usize {
+        if total > params.max_asdu_length() as usize {
             return Err(Error::Encode(format!(
                 "ASDU size {} exceeds max_asdu_length {}",
-                total, params.max_asdu_length
+                total, params.max_asdu_length()
             )));
         }
 
@@ -110,16 +113,16 @@ impl Asdu {
         if self.header.is_sequence {
             // SQ=1: write first IOA, then all payloads without IOAs
             if let Some(first) = self.objects.first() {
-                first.address.encode(buf, params.size_of_ioa)?;
+                first.address.encode(buf, params.size_of_ioa())?;
                 for ao in &self.objects {
-                    ao.object.encode(buf)?;
+                    ao.value.encode(buf)?;
                 }
             }
         } else {
             // SQ=0: write IOA + payload for each object
             for ao in &self.objects {
-                ao.address.encode(buf, params.size_of_ioa)?;
-                ao.object.encode(buf)?;
+                ao.address.encode(buf, params.size_of_ioa())?;
+                ao.value.encode(buf)?;
             }
         }
 
@@ -129,13 +132,13 @@ impl Asdu {
     /// Calculate the total encoded size in bytes.
     pub fn encoded_size(&self, params: &AppLayerParameters) -> usize {
         let header_size = AsduHeader::encoded_size(params);
-        let ioa_size = params.size_of_ioa as usize;
+        let ioa_size = params.size_of_ioa() as usize;
 
         if self.objects.is_empty() {
             return header_size;
         }
 
-        let obj_data_size: usize = self.objects.iter().map(|ao| ao.object.encoded_size()).sum();
+        let obj_data_size: usize = self.objects.iter().map(|ao| ao.value.encoded_size()).sum();
 
         if self.header.is_sequence {
             // SQ=1: one IOA + N payloads
@@ -152,7 +155,7 @@ mod tests {
     use super::*;
     use bytes::{BytesMut, Bytes};
     use crate::info::SinglePointInformation;
-    use crate::types::{CauseOfTransmission, QualityDescriptor, TypeId};
+    use crate::types::{CauseOfTransmission, CommonAddress, OriginatorAddress, QualityDescriptor, TypeId};
 
     fn spi(val: bool) -> InformationObject {
         InformationObject::SinglePoint(SinglePointInformation::new(val, QualityDescriptor::empty()))
@@ -172,13 +175,13 @@ mod tests {
                 cause: CauseOfTransmission::Spontaneous,
                 is_test: false,
                 is_negative: false,
-                originator_address: 0,
-                common_address: 1,
+                originator_address: OriginatorAddress::default(),
+                common_address: CommonAddress::new(1),
             },
             objects: vec![
-                AddressedObject { address: 100u32.into(), object: spi(true) },
-                AddressedObject { address: 200u32.into(), object: spi(false) },
-                AddressedObject { address: 300u32.into(), object: spi(true) },
+                Indexed { address: 100u16.into(), value: spi(true) },
+                Indexed { address: 200u16.into(), value: spi(false) },
+                Indexed { address: 300u16.into(), value: spi(true) },
             ],
         };
 
@@ -202,13 +205,13 @@ mod tests {
                 cause: CauseOfTransmission::InterrogatedByStation,
                 is_test: false,
                 is_negative: false,
-                originator_address: 0,
-                common_address: 1,
+                originator_address: OriginatorAddress::default(),
+                common_address: CommonAddress::new(1),
             },
             objects: vec![
-                AddressedObject { address: 100u32.into(), object: spi(true) },
-                AddressedObject { address: 101u32.into(), object: spi(false) },
-                AddressedObject { address: 102u32.into(), object: spi(true) },
+                Indexed { address: 100u16.into(), value: spi(true) },
+                Indexed { address: 101u16.into(), value: spi(false) },
+                Indexed { address: 102u16.into(), value: spi(true) },
             ],
         };
 
@@ -236,14 +239,14 @@ mod tests {
                 cause: CauseOfTransmission::Spontaneous,
                 is_test: false,
                 is_negative: false,
-                originator_address: 0,
-                common_address: 1,
+                originator_address: OriginatorAddress::default(),
+                common_address: CommonAddress::new(1),
             },
             objects: vec![
-                AddressedObject { address: 100u32.into(), object: spi(true) },
-                AddressedObject {
-                    address: 101u32.into(),
-                    object: InformationObject::Interrogation(
+                Indexed { address: 100u16.into(), value: spi(true) },
+                Indexed {
+                    address: 101u16.into(),
+                    value: InformationObject::Interrogation(
                         crate::info::InterrogationCommand::station(),
                     ),
                 },
@@ -265,12 +268,12 @@ mod tests {
                 cause: CauseOfTransmission::Spontaneous,
                 is_test: false,
                 is_negative: false,
-                originator_address: 0,
-                common_address: 1,
+                originator_address: OriginatorAddress::default(),
+                common_address: CommonAddress::new(1),
             },
             objects: vec![
-                AddressedObject { address: 100u32.into(), object: spi(true) },
-                AddressedObject { address: 200u32.into(), object: spi(false) }, // gap!
+                Indexed { address: 100u16.into(), value: spi(true) },
+                Indexed { address: 200u16.into(), value: spi(false) }, // gap!
             ],
         };
 
@@ -281,17 +284,17 @@ mod tests {
 
     #[test]
     fn encode_rejects_exceeding_max_length() {
-        let params = AppLayerParameters {
-            max_asdu_length: 10, // artificially small
-            ..cs104()
-        };
+        let params = AppLayerParameters::builder()
+            .max_asdu_length(10) // artificially small
+            .build()
+            .unwrap();
 
-        let asdu = AsduBuilder::new(CauseOfTransmission::Spontaneous, 1)
-            .add(100u32, spi(true))
+        let asdu = AsduBuilder::new(CauseOfTransmission::Spontaneous, CommonAddress::new(1))
+            .add(100u16, spi(true))
             .unwrap()
-            .add(101u32, spi(false))
+            .add(101u16, spi(false))
             .unwrap()
-            .add(102u32, spi(true))
+            .add(102u16, spi(true))
             .unwrap()
             .build()
             .unwrap();
@@ -303,12 +306,12 @@ mod tests {
     #[test]
     fn builder_encode_roundtrip() {
         let params = cs104();
-        let asdu = AsduBuilder::new(CauseOfTransmission::Spontaneous, 1)
-            .originator(7)
+        let asdu = AsduBuilder::new(CauseOfTransmission::Spontaneous, CommonAddress::new(1))
+            .originator(OriginatorAddress::new(7))
             .sequential(true)
-            .add(100u32, spi(true))
+            .add(100u16, spi(true))
             .unwrap()
-            .add(101u32, spi(false))
+            .add(101u16, spi(false))
             .unwrap()
             .build()
             .unwrap();
@@ -331,8 +334,8 @@ mod tests {
                 cause: CauseOfTransmission::Spontaneous,
                 is_test: false,
                 is_negative: false,
-                originator_address: 0,
-                common_address: 1,
+                originator_address: OriginatorAddress::default(),
+                common_address: CommonAddress::new(1),
             },
             objects: vec![],
         };
@@ -342,13 +345,13 @@ mod tests {
 
     #[test]
     fn roundtrip_cs101_small_params() {
-        let params = AppLayerParameters {
-            size_of_cot: 1,
-            size_of_ca: 1,
-            size_of_ioa: 1,
-            max_asdu_length: 254,
-            originator_address: 0,
-        };
+        let params = AppLayerParameters::builder()
+            .size_of_cot(1)
+            .size_of_ca(1)
+            .size_of_ioa(1)
+            .max_asdu_length(254)
+            .build()
+            .unwrap();
 
         let asdu = Asdu {
             header: AsduHeader {
@@ -358,12 +361,12 @@ mod tests {
                 cause: CauseOfTransmission::Spontaneous,
                 is_test: false,
                 is_negative: false,
-                originator_address: 0,
-                common_address: 5,
+                originator_address: OriginatorAddress::default(),
+                common_address: CommonAddress::new(5),
             },
             objects: vec![
-                AddressedObject { address: 10u32.into(), object: spi(true) },
-                AddressedObject { address: 20u32.into(), object: spi(false) },
+                Indexed { address: 10u16.into(), value: spi(true) },
+                Indexed { address: 20u16.into(), value: spi(false) },
             ],
         };
 

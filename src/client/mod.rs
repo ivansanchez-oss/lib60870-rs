@@ -17,7 +17,9 @@ use crate::transport::{
     RetryStrategy, SerialOverTcpConfig, SerialOverTcpConnector, TcpConfig, TcpConnector,
 };
 
-use crate::types::{ApciParameters, AppLayerParameters, CauseOfTransmission, Cp56Time2a};
+use crate::types::{
+    ApciParameters, AppLayerParameters, CauseOfTransmission, CommonAddress, Cp56Time2a,
+};
 
 #[cfg(feature = "tls")]
 use crate::transport::{TlsConfig, TlsConnector};
@@ -131,10 +133,10 @@ impl ClientHandle {
     }
 
     /// Send a station interrogation command.
-    pub async fn interrogation(&self, ca: u16, qoi: u8) -> Result<(), Error> {
+    pub async fn interrogation(&self, ca: CommonAddress, qoi: u8) -> Result<(), Error> {
         let asdu = AsduBuilder::new(CauseOfTransmission::Activation, ca)
             .add(
-                InformationObjectAddress::new(0),
+                InformationObjectAddress::from(0u16),
                 InformationObject::Interrogation(InterrogationCommand::new(qoi)),
             )?
             .build()?;
@@ -142,10 +144,10 @@ impl ClientHandle {
     }
 
     /// Send a counter interrogation command.
-    pub async fn counter_interrogation(&self, ca: u16, qcc: u8) -> Result<(), Error> {
+    pub async fn counter_interrogation(&self, ca: CommonAddress, qcc: u8) -> Result<(), Error> {
         let asdu = AsduBuilder::new(CauseOfTransmission::Activation, ca)
             .add(
-                InformationObjectAddress::new(0),
+                InformationObjectAddress::from(0u16),
                 InformationObject::CounterInterrogation(CounterInterrogationCommand::new(qcc)),
             )?
             .build()?;
@@ -153,21 +155,22 @@ impl ClientHandle {
     }
 
     /// Send a read command for a specific information object address.
-    pub async fn read(&self, ca: u16, ioa: u32) -> Result<(), Error> {
+    pub async fn read(
+        &self,
+        ca: CommonAddress,
+        ioa: InformationObjectAddress,
+    ) -> Result<(), Error> {
         let asdu = AsduBuilder::new(CauseOfTransmission::Request, ca)
-            .add(
-                InformationObjectAddress::new(ioa),
-                InformationObject::Read(ReadCommand),
-            )?
+            .add(ioa, InformationObject::Read(ReadCommand))?
             .build()?;
         self.send_asdu(asdu).await
     }
 
     /// Send a clock synchronization command.
-    pub async fn clock_sync(&self, ca: u16, time: Cp56Time2a) -> Result<(), Error> {
+    pub async fn clock_sync(&self, ca: CommonAddress, time: Cp56Time2a) -> Result<(), Error> {
         let asdu = AsduBuilder::new(CauseOfTransmission::Activation, ca)
             .add(
-                InformationObjectAddress::new(0),
+                InformationObjectAddress::from(0u16),
                 InformationObject::ClockSync(ClockSyncCommand::new(time)),
             )?
             .build()?;

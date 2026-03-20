@@ -23,6 +23,9 @@ pub enum Error {
     #[error("invalid value {value} for {type_name}")]
     InvalidValue { type_name: &'static str, value: u8 },
 
+    #[error("invalid parameter: {0}")]
+    InvalidParameter(String),
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }

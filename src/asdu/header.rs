@@ -1,7 +1,7 @@
 use bytes::{Buf, BufMut};
 
 use crate::error::{Error, Result};
-use crate::types::{AppLayerParameters, CauseOfTransmission, TypeId};
+use crate::types::{AppLayerParameters, CauseOfTransmission, CommonAddress, OriginatorAddress, TypeId};
 
 /// ASDU header: type identification, variable structure qualifier, cause of
 /// transmission, and common address.
@@ -18,9 +18,9 @@ pub struct AsduHeader {
     /// Positive/Negative confirmation bit from the COT byte.
     pub is_negative: bool,
     /// Originator address (byte 1 of COT when `size_of_cot == 2`).
-    pub originator_address: u8,
+    pub originator_address: OriginatorAddress,
     /// Common address of ASDU (1-2 bytes depending on `size_of_ca`).
-    pub common_address: u16,
+    pub common_address: CommonAddress,
 }
 
 impl AsduHeader {
@@ -63,17 +63,17 @@ impl AsduHeader {
             })?;
 
         // COT byte 1 (originator address, if size_of_cot == 2)
-        let originator_address = if params.size_of_cot >= 2 {
-            buf.get_u8()
+        let originator_address = if params.size_of_cot() >= 2 {
+            OriginatorAddress::new(buf.get_u8())
         } else {
-            0
+            OriginatorAddress::default()
         };
 
         // Common address (1-2 bytes LE)
-        let common_address = if params.size_of_ca >= 2 {
-            buf.get_u16_le()
+        let common_address = if params.size_of_ca() >= 2 {
+            CommonAddress::new(buf.get_u16_le())
         } else {
-            buf.get_u8() as u16
+            CommonAddress::new(buf.get_u8() as u16)
         };
 
         Ok(Self {
@@ -119,15 +119,15 @@ impl AsduHeader {
         buf.put_u8(cot_byte0);
 
         // COT byte 1
-        if params.size_of_cot >= 2 {
-            buf.put_u8(self.originator_address);
+        if params.size_of_cot() >= 2 {
+            buf.put_u8(self.originator_address.value());
         }
 
         // Common address
-        if params.size_of_ca >= 2 {
-            buf.put_u16_le(self.common_address);
+        if params.size_of_ca() >= 2 {
+            buf.put_u16_le(self.common_address.value());
         } else {
-            buf.put_u8(self.common_address as u8);
+            buf.put_u8(self.common_address.value() as u8);
         }
 
         Ok(())
@@ -149,8 +149,8 @@ mod tests {
             cause: CauseOfTransmission::Spontaneous,
             is_test: false,
             is_negative: false,
-            originator_address: 0,
-            common_address: 1,
+            originator_address: OriginatorAddress::default(),
+            common_address: CommonAddress::new(1),
         };
 
         let mut buf = BytesMut::with_capacity(32);
@@ -164,13 +164,13 @@ mod tests {
 
     #[test]
     fn roundtrip_cs101_1byte_ca() {
-        let params = AppLayerParameters {
-            size_of_cot: 1,
-            size_of_ca: 1,
-            size_of_ioa: 2,
-            max_asdu_length: 254,
-            originator_address: 0,
-        };
+        let params = AppLayerParameters::builder()
+            .size_of_cot(1)
+            .size_of_ca(1)
+            .size_of_ioa(2)
+            .max_asdu_length(254)
+            .build()
+            .unwrap();
         let header = AsduHeader {
             type_id: TypeId::CScNa1,
             is_sequence: true,
@@ -178,8 +178,8 @@ mod tests {
             cause: CauseOfTransmission::Activation,
             is_test: true,
             is_negative: true,
-            originator_address: 0, // ignored when size_of_cot == 1
-            common_address: 5,
+            originator_address: OriginatorAddress::default(), // ignored when size_of_cot == 1
+            common_address: CommonAddress::new(5),
         };
 
         let mut buf = BytesMut::with_capacity(32);
@@ -196,7 +196,7 @@ mod tests {
         assert_eq!(decoded.is_negative, header.is_negative);
         assert_eq!(decoded.common_address, header.common_address);
         // originator_address not encoded when size_of_cot == 1
-        assert_eq!(decoded.originator_address, 0);
+        assert_eq!(decoded.originator_address, OriginatorAddress::default());
     }
 
     #[test]
@@ -209,8 +209,8 @@ mod tests {
             cause: CauseOfTransmission::Activation,
             is_test: true,
             is_negative: true,
-            originator_address: 42,
-            common_address: 0x1234,
+            originator_address: OriginatorAddress::new(42),
+            common_address: CommonAddress::new(0x1234),
         };
 
         let mut buf = BytesMut::with_capacity(32);
@@ -219,8 +219,8 @@ mod tests {
         let decoded = AsduHeader::decode(&mut reader, &params).unwrap();
         assert_eq!(decoded.is_test, true);
         assert_eq!(decoded.is_negative, true);
-        assert_eq!(decoded.originator_address, 42);
-        assert_eq!(decoded.common_address, 0x1234);
+        assert_eq!(decoded.originator_address, OriginatorAddress::new(42));
+        assert_eq!(decoded.common_address, CommonAddress::new(0x1234));
     }
 
     #[test]
@@ -233,8 +233,8 @@ mod tests {
             cause: CauseOfTransmission::Periodic,
             is_test: false,
             is_negative: false,
-            originator_address: 0,
-            common_address: 1,
+            originator_address: OriginatorAddress::default(),
+            common_address: CommonAddress::new(1),
         };
 
         let mut buf = BytesMut::with_capacity(32);
