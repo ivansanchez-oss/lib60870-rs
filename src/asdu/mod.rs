@@ -4,7 +4,7 @@ pub mod builder;
 
 use bytes::{Buf, BufMut};
 
-use crate::error::{Error, Result};
+use crate::error::AduError;
 use crate::info::InformationObject;
 use crate::types::AppLayerParameters;
 
@@ -32,7 +32,7 @@ pub struct Asdu {
 
 impl Asdu {
     /// Decode a complete ASDU from the buffer.
-    pub fn decode(buf: &mut impl Buf, params: &AppLayerParameters) -> Result<Self> {
+    pub fn decode(buf: &mut impl Buf, params: &AppLayerParameters) -> Result<Self, AduError> {
         let header = AsduHeader::decode(buf, params)?;
         let n = header.num_objects as usize;
         let mut objects = Vec::with_capacity(n);
@@ -73,25 +73,24 @@ impl Asdu {
     }
 
     /// Encode the ASDU into the buffer.
-    pub fn encode(&self, buf: &mut impl BufMut, params: &AppLayerParameters) -> Result<()> {
+    pub fn encode(&self, buf: &mut impl BufMut, params: &AppLayerParameters) -> Result<(), AduError> {
         // Validate: all objects must have the same type_id as the header
         for ao in &self.objects {
             if ao.value.type_id() != self.header.type_id {
-                return Err(Error::Encode(format!(
-                    "object type {} does not match header type {}",
-                    ao.value.type_id(),
-                    self.header.type_id
-                )));
+                return Err(AduError::TypeMismatch {
+                    expected: self.header.type_id.as_u8(),
+                    got: ao.value.type_id().as_u8(),
+                });
             }
         }
 
         // Validate: total encoded size must not exceed max_asdu_length
         let total = self.encoded_size(params);
         if total > params.max_asdu_length() as usize {
-            return Err(Error::Encode(format!(
-                "ASDU size {} exceeds max_asdu_length {}",
-                total, params.max_asdu_length()
-            )));
+            return Err(AduError::ExceedsMaxLength {
+                size: total,
+                max: params.max_asdu_length(),
+            });
         }
 
         // Validate: if SQ=1, IOAs must be consecutive
@@ -100,10 +99,11 @@ impl Asdu {
             for (i, ao) in self.objects.iter().enumerate().skip(1) {
                 let expected = base + i as u32;
                 if ao.address.value() != expected {
-                    return Err(Error::Encode(format!(
-                        "sequential IOA at index {}: expected {}, got {}",
-                        i, expected, ao.address.value()
-                    )));
+                    return Err(AduError::NonSequentialIoa {
+                        index: i,
+                        expected,
+                        got: ao.address.value(),
+                    });
                 }
             }
         }

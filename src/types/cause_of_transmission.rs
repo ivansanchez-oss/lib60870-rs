@@ -1,4 +1,7 @@
-use crate::error::Error;
+/// Error returned when a raw u8 doesn't map to a known CauseOfTransmission.
+#[derive(Debug, thiserror::Error)]
+#[error("invalid cause of transmission: {0}")]
+pub struct InvalidCauseOfTransmission(pub u8);
 
 /// Cause of transmission as defined in IEC 60870-5-101 section 7.2.3.
 #[repr(u8)]
@@ -55,9 +58,9 @@ impl CauseOfTransmission {
 }
 
 impl TryFrom<u8> for CauseOfTransmission {
-    type Error = Error;
+    type Error = InvalidCauseOfTransmission;
 
-    fn try_from(value: u8) -> Result<Self, Error> {
+    fn try_from(value: u8) -> Result<Self, InvalidCauseOfTransmission> {
         match value {
             1 => Ok(Self::Periodic),
             2 => Ok(Self::BackgroundScan),
@@ -101,10 +104,7 @@ impl TryFrom<u8> for CauseOfTransmission {
             45 => Ok(Self::UnknownCot),
             46 => Ok(Self::UnknownCa),
             47 => Ok(Self::UnknownIoa),
-            _ => Err(Error::InvalidValue {
-                type_name: "CauseOfTransmission",
-                value,
-            }),
+            _ => Err(InvalidCauseOfTransmission(value)),
         }
     }
 }

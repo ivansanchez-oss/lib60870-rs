@@ -1,6 +1,6 @@
 use bytes::{Buf, BufMut};
 
-use crate::error::{Error, Result};
+use crate::error::AduError;
 use crate::types::QualityDescriptor;
 
 use super::traits::{Decode, Encode};
@@ -25,9 +25,9 @@ impl MeasuredValueNormalized {
 }
 
 impl Encode for MeasuredValueNormalized {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), AduError> {
         if buf.remaining_mut() < Self::ENCODED_SIZE {
-            return Err(Error::BufferTooShort {
+            return Err(AduError::BufferTooShort {
                 need: Self::ENCODED_SIZE,
                 have: buf.remaining_mut(),
             });
@@ -43,9 +43,9 @@ impl Encode for MeasuredValueNormalized {
 }
 
 impl Decode for MeasuredValueNormalized {
-    fn decode(buf: &mut impl Buf) -> Result<Self> {
+    fn decode(buf: &mut impl Buf) -> Result<Self, AduError> {
         if buf.remaining() < Self::ENCODED_SIZE {
-            return Err(Error::BufferTooShort {
+            return Err(AduError::BufferTooShort {
                 need: Self::ENCODED_SIZE,
                 have: buf.remaining(),
             });
@@ -73,9 +73,9 @@ impl MeasuredValueNormalizedNoQuality {
 }
 
 impl Encode for MeasuredValueNormalizedNoQuality {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), AduError> {
         if buf.remaining_mut() < Self::ENCODED_SIZE {
-            return Err(Error::BufferTooShort {
+            return Err(AduError::BufferTooShort {
                 need: Self::ENCODED_SIZE,
                 have: buf.remaining_mut(),
             });
@@ -90,9 +90,9 @@ impl Encode for MeasuredValueNormalizedNoQuality {
 }
 
 impl Decode for MeasuredValueNormalizedNoQuality {
-    fn decode(buf: &mut impl Buf) -> Result<Self> {
+    fn decode(buf: &mut impl Buf) -> Result<Self, AduError> {
         if buf.remaining() < Self::ENCODED_SIZE {
-            return Err(Error::BufferTooShort {
+            return Err(AduError::BufferTooShort {
                 need: Self::ENCODED_SIZE,
                 have: buf.remaining(),
             });

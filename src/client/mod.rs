@@ -1,13 +1,12 @@
 mod task;
 
-use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot};
 
 use crate::asdu::{Asdu, AsduBuilder, InformationObjectAddress};
-use crate::error::Error;
+use crate::error::RequestError;
 use crate::info::{
     ClockSyncCommand, CounterInterrogationCommand, InformationObject, InterrogationCommand,
     ReadCommand,
@@ -73,7 +72,7 @@ impl Default for ClientConfig {
 /// Lightweight and cloneable. All methods are async and wait until the
 /// command is enqueued into the send window (backpressure if window is full).
 ///
-/// Sending commands while disconnected returns [`Error::NotConnected`]
+/// Sending commands while disconnected returns [`RequestError::NotConnected`]
 /// immediately, matching the behavior of the C lib60870.
 #[derive(Clone)]
 pub struct ClientHandle {
@@ -83,14 +82,14 @@ pub struct ClientHandle {
 
 pub(crate) enum ClientCommand {
     StartDt {
-        response: oneshot::Sender<Result<(), io::Error>>,
+        response: oneshot::Sender<Result<(), RequestError>>,
     },
     StopDt {
-        response: oneshot::Sender<Result<(), io::Error>>,
+        response: oneshot::Sender<Result<(), RequestError>>,
     },
     SendAsdu {
         asdu: Asdu,
-        response: oneshot::Sender<Result<(), io::Error>>,
+        response: oneshot::Sender<Result<(), RequestError>>,
     },
     Shutdown {
         response: oneshot::Sender<()>,
@@ -106,34 +105,30 @@ impl ClientHandle {
     /// Send STARTDT activation to begin data transfer.
     ///
     /// Must be called after the transport connects before sending any ASDUs.
-    pub async fn start_dt(&self) -> Result<(), Error> {
+    pub async fn start_dt(&self) -> Result<(), RequestError> {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(ClientCommand::StartDt { response: tx })
             .await
-            .map_err(|_| Error::Connection("client task closed".into()))?;
-        rx.await
-            .map_err(|_| Error::Connection("client task closed".into()))?
-            .map_err(Error::Io)
+            .map_err(|_| RequestError::TaskClosed)?;
+        rx.await.map_err(|_| RequestError::TaskClosed)?
     }
 
     /// Send STOPDT activation to pause data transfer.
     ///
     /// After this, the connection remains open but no I-frames are exchanged
     /// until [`start_dt()`](ClientHandle::start_dt) is called again.
-    pub async fn stop_dt(&self) -> Result<(), Error> {
+    pub async fn stop_dt(&self) -> Result<(), RequestError> {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(ClientCommand::StopDt { response: tx })
             .await
-            .map_err(|_| Error::Connection("client task closed".into()))?;
-        rx.await
-            .map_err(|_| Error::Connection("client task closed".into()))?
-            .map_err(Error::Io)
+            .map_err(|_| RequestError::TaskClosed)?;
+        rx.await.map_err(|_| RequestError::TaskClosed)?
     }
 
     /// Send a station interrogation command.
-    pub async fn interrogation(&self, ca: CommonAddress, qoi: u8) -> Result<(), Error> {
+    pub async fn interrogation(&self, ca: CommonAddress, qoi: u8) -> Result<(), RequestError> {
         let asdu = AsduBuilder::new(CauseOfTransmission::Activation, ca)
             .add(
                 InformationObjectAddress::from(0u16),
@@ -144,7 +139,7 @@ impl ClientHandle {
     }
 
     /// Send a counter interrogation command.
-    pub async fn counter_interrogation(&self, ca: CommonAddress, qcc: u8) -> Result<(), Error> {
+    pub async fn counter_interrogation(&self, ca: CommonAddress, qcc: u8) -> Result<(), RequestError> {
         let asdu = AsduBuilder::new(CauseOfTransmission::Activation, ca)
             .add(
                 InformationObjectAddress::from(0u16),
@@ -159,7 +154,7 @@ impl ClientHandle {
         &self,
         ca: CommonAddress,
         ioa: InformationObjectAddress,
-    ) -> Result<(), Error> {
+    ) -> Result<(), RequestError> {
         let asdu = AsduBuilder::new(CauseOfTransmission::Request, ca)
             .add(ioa, InformationObject::Read(ReadCommand))?
             .build()?;
@@ -167,7 +162,7 @@ impl ClientHandle {
     }
 
     /// Send a clock synchronization command.
-    pub async fn clock_sync(&self, ca: CommonAddress, time: Cp56Time2a) -> Result<(), Error> {
+    pub async fn clock_sync(&self, ca: CommonAddress, time: Cp56Time2a) -> Result<(), RequestError> {
         let asdu = AsduBuilder::new(CauseOfTransmission::Activation, ca)
             .add(
                 InformationObjectAddress::from(0u16),
@@ -178,30 +173,28 @@ impl ClientHandle {
     }
 
     /// Send an arbitrary pre-built ASDU (e.g. control commands).
-    pub async fn send_command(&self, asdu: Asdu) -> Result<(), Error> {
+    pub async fn send_command(&self, asdu: Asdu) -> Result<(), RequestError> {
         self.send_asdu(asdu).await
     }
 
     /// Gracefully shut down the client session.
-    pub async fn shutdown(&self) -> Result<(), Error> {
+    pub async fn shutdown(&self) -> Result<(), RequestError> {
         let (tx, rx) = oneshot::channel();
         let _ = self.tx.send(ClientCommand::Shutdown { response: tx }).await;
         let _ = rx.await;
         Ok(())
     }
 
-    async fn send_asdu(&self, asdu: Asdu) -> Result<(), Error> {
+    async fn send_asdu(&self, asdu: Asdu) -> Result<(), RequestError> {
         if !self.connected.load(Ordering::Acquire) {
-            return Err(Error::NotConnected);
+            return Err(RequestError::NotConnected);
         }
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(ClientCommand::SendAsdu { asdu, response: tx })
             .await
-            .map_err(|_| Error::Connection("client task closed".into()))?;
-        rx.await
-            .map_err(|_| Error::Connection("client task closed".into()))?
-            .map_err(Error::Io)
+            .map_err(|_| RequestError::TaskClosed)?;
+        rx.await.map_err(|_| RequestError::TaskClosed)?
     }
 }
 

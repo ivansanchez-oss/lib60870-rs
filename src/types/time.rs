@@ -1,8 +1,8 @@
-use crate::error::{Error, Result};
+use crate::error::AduError;
 
-fn check_len(buf_len: usize, required: usize) -> Result<()> {
+fn check_len(buf_len: usize, required: usize) -> Result<(), AduError> {
     if buf_len < required {
-        return Err(Error::BufferTooShort {
+        return Err(AduError::BufferTooShort {
             need: required,
             have: buf_len,
         });
@@ -37,7 +37,7 @@ impl Cp16Time2a {
         Self { bytes: [0; 2] }
     }
 
-    pub fn from_bytes(buf: &[u8]) -> Result<Self> {
+    pub fn from_bytes(buf: &[u8]) -> Result<Self, AduError> {
         check_len(buf.len(), Self::ENCODED_SIZE)?;
         let mut bytes = [0u8; 2];
         bytes.copy_from_slice(&buf[..2]);
@@ -80,7 +80,7 @@ impl Cp24Time2a {
         Self { bytes: [0; 3] }
     }
 
-    pub fn from_bytes(buf: &[u8]) -> Result<Self> {
+    pub fn from_bytes(buf: &[u8]) -> Result<Self, AduError> {
         check_len(buf.len(), Self::ENCODED_SIZE)?;
         let mut bytes = [0u8; 3];
         bytes.copy_from_slice(&buf[..3]);
@@ -169,7 +169,7 @@ impl Cp56Time2a {
         Self { bytes: [0; 7] }
     }
 
-    pub fn from_bytes(buf: &[u8]) -> Result<Self> {
+    pub fn from_bytes(buf: &[u8]) -> Result<Self, AduError> {
         check_len(buf.len(), Self::ENCODED_SIZE)?;
         let mut bytes = [0u8; 7];
         bytes.copy_from_slice(&buf[..7]);

@@ -1,4 +1,3 @@
-use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -10,6 +9,7 @@ use tracing::{debug, info, warn};
 
 use crate::apci::{self, Apdu, UFunction};
 use crate::asdu::Asdu;
+use crate::error::RequestError;
 use crate::transport::{connect_with_retry, Connector, PhysLayer};
 
 use super::{ClientCommand, ClientConfig, ClientHandler, ConnectionState};
@@ -128,7 +128,7 @@ async fn run_session<H: ClientHandler>(
     param: &mut H::Param,
     commands: &mut mpsc::Receiver<ClientCommand>,
     phys: PhysLayer,
-) -> io::Result<SessionEnd> {
+) -> Result<SessionEnd, RequestError> {
     let (mut reader, mut writer) = tokio::io::split(phys);
 
     loop {
@@ -180,7 +180,7 @@ async fn wait_for_start_dt(
     commands: &mut mpsc::Receiver<ClientCommand>,
     reader: &mut ReadHalf<PhysLayer>,
     writer: &mut WriteHalf<PhysLayer>,
-) -> io::Result<Option<SessionEnd>> {
+) -> Result<Option<SessionEnd>, RequestError> {
     loop {
         tokio::select! {
             frame_result = apci::read_apdu(reader) => {
@@ -206,10 +206,7 @@ async fn wait_for_start_dt(
 
                         let result = time::timeout(config.apci.t0(), apci::read_apdu(reader))
                             .await
-                            .map_err(|_| io::Error::new(
-                                io::ErrorKind::TimedOut,
-                                "STARTDT con timeout (t0)",
-                            ))?;
+                            .map_err(|_| RequestError::Timeout("STARTDT con timeout (t0)"))?;
 
                         match result? {
                             Apdu::U(UFunction::StartDtCon) => {
@@ -218,26 +215,17 @@ async fn wait_for_start_dt(
                                 return Ok(None);
                             }
                             other => {
-                                let err = io::Error::new(
-                                    io::ErrorKind::InvalidData,
-                                    format!("expected STARTDT con, got {:?}", other),
-                                );
-                                let _ = response.send(Err(io::Error::new(err.kind(), err.to_string())));
-                                return Err(err);
+                                let msg = format!("expected STARTDT con, got {:?}", other);
+                                let _ = response.send(Err(RequestError::UnexpectedResponse(msg.clone())));
+                                return Err(RequestError::UnexpectedResponse(msg));
                             }
                         }
                     }
                     Some(ClientCommand::StopDt { response }) => {
-                        let _ = response.send(Err(io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            "data transfer not active",
-                        )));
+                        let _ = response.send(Err(RequestError::NotActive));
                     }
                     Some(ClientCommand::SendAsdu { response, .. }) => {
-                        let _ = response.send(Err(io::Error::new(
-                            io::ErrorKind::NotConnected,
-                            "data transfer not active, call start_dt() first",
-                        )));
+                        let _ = response.send(Err(RequestError::NotConnected));
                     }
                     Some(ClientCommand::Shutdown { response }) => {
                         let _ = response.send(());
@@ -258,7 +246,7 @@ async fn run_data_transfer<H: ClientHandler>(
     reader: &mut ReadHalf<PhysLayer>,
     writer: &mut WriteHalf<PhysLayer>,
     state: &mut SessionState,
-) -> io::Result<DataTransferEnd> {
+) -> Result<DataTransferEnd, RequestError> {
     let apci_params = &config.apci;
 
     loop {
@@ -273,13 +261,10 @@ async fn run_data_transfer<H: ClientHandler>(
                 match frame {
                     Apdu::I { send_seq, recv_seq, mut payload } => {
                         if send_seq != state.recv_seq {
-                            return Err(io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                format!(
-                                    "sequence error: expected {}, got {}",
-                                    state.recv_seq, send_seq
-                                ),
-                            ));
+                            return Err(RequestError::SequenceError {
+                                expected: state.recv_seq,
+                                got: send_seq,
+                            });
                         }
 
                         state.recv_seq = (state.recv_seq + 1) % 32768;
@@ -332,15 +317,12 @@ async fn run_data_transfer<H: ClientHandler>(
             cmd = commands.recv() => {
                 match cmd {
                     Some(ClientCommand::StartDt { response }) => {
-                        let _ = response.send(Err(io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            "data transfer already active",
-                        )));
+                        let _ = response.send(Err(RequestError::AlreadyActive));
                     }
                     Some(ClientCommand::StopDt { response }) => {
                         let result = apci::write_apdu(writer, &Apdu::U(UFunction::StopDtAct)).await;
                         if let Err(e) = result {
-                            let _ = response.send(Err(e));
+                            let _ = response.send(Err(e.into()));
                             return Ok(DataTransferEnd::Disconnected);
                         }
                         // Wait for STOPDT con within t0
@@ -351,24 +333,18 @@ async fn run_data_transfer<H: ClientHandler>(
                                 return Ok(DataTransferEnd::Stopped);
                             }
                             Ok(Ok(other)) => {
-                                let err = io::Error::new(
-                                    io::ErrorKind::InvalidData,
-                                    format!("expected STOPDT con, got {:?}", other),
-                                );
-                                let _ = response.send(Err(io::Error::new(err.kind(), err.to_string())));
-                                return Err(err);
+                                let msg = format!("expected STOPDT con, got {:?}", other);
+                                let _ = response.send(Err(RequestError::UnexpectedResponse(msg.clone())));
+                                return Err(RequestError::UnexpectedResponse(msg));
                             }
                             Ok(Err(e)) => {
-                                let _ = response.send(Err(io::Error::new(e.kind(), e.to_string())));
-                                return Err(e);
+                                let err = RequestError::from(e);
+                                let _ = response.send(Err(RequestError::NotConnected));
+                                return Err(err);
                             }
                             Err(_) => {
-                                let err = io::Error::new(
-                                    io::ErrorKind::TimedOut,
-                                    "STOPDT con timeout (t0)",
-                                );
-                                let _ = response.send(Err(io::Error::new(err.kind(), err.to_string())));
-                                return Err(err);
+                                let _ = response.send(Err(RequestError::Timeout("STOPDT con timeout (t0)")));
+                                return Err(RequestError::Timeout("STOPDT con timeout (t0)"));
                             }
                         }
                     }
@@ -394,10 +370,7 @@ async fn run_data_transfer<H: ClientHandler>(
                     None => std::future::pending().await,
                 }
             } => {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "t1 timeout: no acknowledgment received",
-                ));
+                return Err(RequestError::Timeout("t1 timeout: no acknowledgment received"));
             }
 
             // --- t2 timeout ---
@@ -436,7 +409,7 @@ fn process_ack(state: &mut SessionState, recv_seq: u16) {
 async fn send_s_frame(
     writer: &mut WriteHalf<PhysLayer>,
     state: &mut SessionState,
-) -> io::Result<()> {
+) -> Result<(), RequestError> {
     apci::write_apdu(
         writer,
         &Apdu::S {
@@ -455,19 +428,13 @@ async fn send_s_frame(
 /// Called after a session ends so that callers waiting on `send_asdu`
 /// get an immediate error instead of hanging until the next reconnect.
 fn drain_pending_commands(commands: &mut mpsc::Receiver<ClientCommand>) {
-    let not_connected = || {
-        io::Error::new(
-            io::ErrorKind::NotConnected,
-            "disconnected while command was pending",
-        )
-    };
     while let Ok(cmd) = commands.try_recv() {
         match cmd {
             ClientCommand::StartDt { response } | ClientCommand::StopDt { response } => {
-                let _ = response.send(Err(not_connected()));
+                let _ = response.send(Err(RequestError::NotConnected));
             }
             ClientCommand::SendAsdu { response, .. } => {
-                let _ = response.send(Err(not_connected()));
+                let _ = response.send(Err(RequestError::NotConnected));
             }
             ClientCommand::Shutdown { response } => {
                 let _ = response.send(());
@@ -481,17 +448,13 @@ async fn send_i_frame(
     writer: &mut WriteHalf<PhysLayer>,
     state: &mut SessionState,
     asdu: &Asdu,
-) -> io::Result<()> {
+) -> Result<(), RequestError> {
     if state.unconfirmed_count() >= config.apci.k() {
-        return Err(io::Error::new(
-            io::ErrorKind::WouldBlock,
-            "send window full (k)",
-        ));
+        return Err(RequestError::SendWindowFull);
     }
 
     let mut payload = BytesMut::new();
-    asdu.encode(&mut payload, &config.app)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    asdu.encode(&mut payload, &config.app)?;
 
     let apdu = Apdu::I {
         send_seq: state.send_seq,

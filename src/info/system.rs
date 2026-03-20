@@ -1,6 +1,6 @@
 use bytes::{Buf, BufMut};
 
-use crate::error::{Error, Result};
+use crate::error::AduError;
 use crate::types::Cp56Time2a;
 
 use super::traits::{Decode, Encode};
@@ -27,9 +27,9 @@ impl InterrogationCommand {
 }
 
 impl Encode for InterrogationCommand {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), AduError> {
         if buf.remaining_mut() < Self::ENCODED_SIZE {
-            return Err(Error::BufferTooShort {
+            return Err(AduError::BufferTooShort {
                 need: Self::ENCODED_SIZE,
                 have: buf.remaining_mut(),
             });
@@ -44,9 +44,9 @@ impl Encode for InterrogationCommand {
 }
 
 impl Decode for InterrogationCommand {
-    fn decode(buf: &mut impl Buf) -> Result<Self> {
+    fn decode(buf: &mut impl Buf) -> Result<Self, AduError> {
         if buf.remaining() < Self::ENCODED_SIZE {
-            return Err(Error::BufferTooShort {
+            return Err(AduError::BufferTooShort {
                 need: Self::ENCODED_SIZE,
                 have: buf.remaining(),
             });
@@ -74,9 +74,9 @@ impl CounterInterrogationCommand {
 }
 
 impl Encode for CounterInterrogationCommand {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), AduError> {
         if buf.remaining_mut() < Self::ENCODED_SIZE {
-            return Err(Error::BufferTooShort {
+            return Err(AduError::BufferTooShort {
                 need: Self::ENCODED_SIZE,
                 have: buf.remaining_mut(),
             });
@@ -91,9 +91,9 @@ impl Encode for CounterInterrogationCommand {
 }
 
 impl Decode for CounterInterrogationCommand {
-    fn decode(buf: &mut impl Buf) -> Result<Self> {
+    fn decode(buf: &mut impl Buf) -> Result<Self, AduError> {
         if buf.remaining() < Self::ENCODED_SIZE {
-            return Err(Error::BufferTooShort {
+            return Err(AduError::BufferTooShort {
                 need: Self::ENCODED_SIZE,
                 have: buf.remaining(),
             });
@@ -113,7 +113,7 @@ impl ReadCommand {
 }
 
 impl Encode for ReadCommand {
-    fn encode(&self, _buf: &mut impl BufMut) -> Result<()> {
+    fn encode(&self, _buf: &mut impl BufMut) -> Result<(), AduError> {
         Ok(())
     }
 
@@ -123,7 +123,7 @@ impl Encode for ReadCommand {
 }
 
 impl Decode for ReadCommand {
-    fn decode(_buf: &mut impl Buf) -> Result<Self> {
+    fn decode(_buf: &mut impl Buf) -> Result<Self, AduError> {
         Ok(Self)
     }
 }
@@ -145,9 +145,9 @@ impl ClockSyncCommand {
 }
 
 impl Encode for ClockSyncCommand {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), AduError> {
         if buf.remaining_mut() < Self::ENCODED_SIZE {
-            return Err(Error::BufferTooShort {
+            return Err(AduError::BufferTooShort {
                 need: Self::ENCODED_SIZE,
                 have: buf.remaining_mut(),
             });
@@ -162,9 +162,9 @@ impl Encode for ClockSyncCommand {
 }
 
 impl Decode for ClockSyncCommand {
-    fn decode(buf: &mut impl Buf) -> Result<Self> {
+    fn decode(buf: &mut impl Buf) -> Result<Self, AduError> {
         if buf.remaining() < Self::ENCODED_SIZE {
-            return Err(Error::BufferTooShort {
+            return Err(AduError::BufferTooShort {
                 need: Self::ENCODED_SIZE,
                 have: buf.remaining(),
             });
@@ -199,9 +199,9 @@ impl EndOfInitialization {
 }
 
 impl Encode for EndOfInitialization {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), AduError> {
         if buf.remaining_mut() < Self::ENCODED_SIZE {
-            return Err(Error::BufferTooShort {
+            return Err(AduError::BufferTooShort {
                 need: Self::ENCODED_SIZE,
                 have: buf.remaining_mut(),
             });
@@ -217,9 +217,9 @@ impl Encode for EndOfInitialization {
 }
 
 impl Decode for EndOfInitialization {
-    fn decode(buf: &mut impl Buf) -> Result<Self> {
+    fn decode(buf: &mut impl Buf) -> Result<Self, AduError> {
         if buf.remaining() < Self::ENCODED_SIZE {
-            return Err(Error::BufferTooShort {
+            return Err(AduError::BufferTooShort {
                 need: Self::ENCODED_SIZE,
                 have: buf.remaining(),
             });

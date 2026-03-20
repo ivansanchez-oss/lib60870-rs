@@ -1,6 +1,6 @@
 use bytes::{Buf, BufMut};
 
-use crate::error::{Error, Result};
+use crate::error::AduError;
 
 use super::traits::{Decode, Encode};
 
@@ -30,9 +30,9 @@ impl SingleCommand {
 }
 
 impl Encode for SingleCommand {
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), AduError> {
         if buf.remaining_mut() < Self::ENCODED_SIZE {
-            return Err(Error::BufferTooShort {
+            return Err(AduError::BufferTooShort {
                 need: Self::ENCODED_SIZE,
                 have: buf.remaining_mut(),
             });
@@ -50,9 +50,9 @@ impl Encode for SingleCommand {
 }
 
 impl Decode for SingleCommand {
-    fn decode(buf: &mut impl Buf) -> Result<Self> {
+    fn decode(buf: &mut impl Buf) -> Result<Self, AduError> {
         if buf.remaining() < Self::ENCODED_SIZE {
-            return Err(Error::BufferTooShort {
+            return Err(AduError::BufferTooShort {
                 need: Self::ENCODED_SIZE,
                 have: buf.remaining(),
             });

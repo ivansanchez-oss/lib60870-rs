@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::error::{Error, Result};
+use crate::error::ConfigError;
 
 /// APCI (Application Protocol Control Information) parameters for CS 104.
 ///
@@ -132,42 +132,30 @@ impl ApciParametersBuilder {
     /// - `w` must not exceed `k`
     /// - `t2` must be less than `t1`
     /// - All timeouts must be non-zero
-    pub fn build(self) -> Result<ApciParameters> {
+    pub fn build(self) -> Result<ApciParameters, ConfigError> {
         if self.k == 0 || self.k > 32767 {
-            return Err(Error::InvalidParameter(format!(
-                "k must be in 1..=32767, got {}",
-                self.k
-            )));
+            return Err(ConfigError::InvalidK(self.k));
         }
         if self.w == 0 || self.w > 32767 {
-            return Err(Error::InvalidParameter(format!(
-                "w must be in 1..=32767, got {}",
-                self.w
-            )));
+            return Err(ConfigError::InvalidW(self.w));
         }
         if self.w > self.k {
-            return Err(Error::InvalidParameter(format!(
-                "w ({}) must not exceed k ({})",
-                self.w, self.k
-            )));
+            return Err(ConfigError::WExceedsK { w: self.w, k: self.k });
         }
         if self.t0.is_zero() {
-            return Err(Error::InvalidParameter("t0 must be non-zero".into()));
+            return Err(ConfigError::ZeroTimeout("t0"));
         }
         if self.t1.is_zero() {
-            return Err(Error::InvalidParameter("t1 must be non-zero".into()));
+            return Err(ConfigError::ZeroTimeout("t1"));
         }
         if self.t2.is_zero() {
-            return Err(Error::InvalidParameter("t2 must be non-zero".into()));
+            return Err(ConfigError::ZeroTimeout("t2"));
         }
         if self.t3.is_zero() {
-            return Err(Error::InvalidParameter("t3 must be non-zero".into()));
+            return Err(ConfigError::ZeroTimeout("t3"));
         }
         if self.t2 >= self.t1 {
-            return Err(Error::InvalidParameter(format!(
-                "t2 ({:?}) must be less than t1 ({:?})",
-                self.t2, self.t1
-            )));
+            return Err(ConfigError::T2NotLessThanT1 { t2: self.t2, t1: self.t1 });
         }
 
         Ok(ApciParameters {

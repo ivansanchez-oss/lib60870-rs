@@ -1,7 +1,7 @@
-use std::io;
-
 use bytes::{BufMut, Bytes, BytesMut};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+
+use crate::error::FrameError;
 
 const START_BYTE: u8 = 0x68;
 const CONTROL_FIELD_SIZE: usize = 4;
@@ -59,27 +59,21 @@ pub enum Apdu {
 }
 
 /// Read one APDU from the stream.
-pub async fn read_apdu(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<Apdu> {
+pub async fn read_apdu(reader: &mut (impl AsyncRead + Unpin)) -> Result<Apdu, FrameError> {
     let start = reader.read_u8().await?;
     if start != START_BYTE {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("expected start byte 0x68, got 0x{:02X}", start),
-        ));
+        return Err(FrameError::InvalidStartByte(start));
     }
 
     let length = reader.read_u8().await? as usize;
     if length < CONTROL_FIELD_SIZE {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "APDU length too short",
-        ));
+        return Err(FrameError::LengthTooShort(length));
     }
     if length > MAX_APDU_LENGTH {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("APDU length {} exceeds maximum {}", length, MAX_APDU_LENGTH),
-        ));
+        return Err(FrameError::LengthExceeded {
+            length,
+            max: MAX_APDU_LENGTH,
+        });
     }
 
     let mut buf = vec![0u8; length];
@@ -106,22 +100,16 @@ pub async fn read_apdu(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<Apdu
         Ok(Apdu::S { recv_seq })
     } else if cf1 & 0x03 == 0x03 {
         // U-frame
-        UFunction::from_byte(cf1).map(Apdu::U).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("unknown U-frame control byte 0x{:02X}", cf1),
-            )
-        })
+        UFunction::from_byte(cf1)
+            .map(Apdu::U)
+            .ok_or(FrameError::UnknownUFunction(cf1))
     } else {
-        Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("invalid control field byte 0x{:02X}", cf1),
-        ))
+        Err(FrameError::InvalidControlField(cf1))
     }
 }
 
 /// Write one APDU to the stream.
-pub async fn write_apdu(writer: &mut (impl AsyncWrite + Unpin), apdu: &Apdu) -> io::Result<()> {
+pub async fn write_apdu(writer: &mut (impl AsyncWrite + Unpin), apdu: &Apdu) -> Result<(), FrameError> {
     match apdu {
         Apdu::I {
             send_seq,
@@ -151,7 +139,8 @@ pub async fn write_apdu(writer: &mut (impl AsyncWrite + Unpin), apdu: &Apdu) -> 
             writer.write_all(&buf).await?;
         }
     }
-    writer.flush().await
+    writer.flush().await?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -222,6 +211,6 @@ mod tests {
             .unwrap();
         client.flush().await.unwrap();
         let err = read_apdu(&mut server).await.unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(matches!(err, FrameError::InvalidStartByte(0x99)));
     }
 }

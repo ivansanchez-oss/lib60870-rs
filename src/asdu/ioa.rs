@@ -1,6 +1,6 @@
 use bytes::{Buf, BufMut};
 
-use crate::error::{Error, Result};
+use crate::error::{AduError, IoaOverflow};
 
 /// Maximum value for a 3-byte IOA.
 const IOA_MAX: u32 = 0xFFFFFF;
@@ -11,11 +11,9 @@ pub struct InformationObjectAddress(u32);
 
 impl InformationObjectAddress {
     /// Create a new IOA, validating that it fits in 3 bytes (max 0xFFFFFF).
-    pub fn try_new(value: u32) -> Result<Self> {
+    pub fn try_new(value: u32) -> Result<Self, IoaOverflow> {
         if value > IOA_MAX {
-            return Err(Error::InvalidParameter(format!(
-                "IOA value {value:#X} exceeds maximum {IOA_MAX:#X}"
-            )));
+            return Err(IoaOverflow(value));
         }
         Ok(Self(value))
     }
@@ -25,10 +23,10 @@ impl InformationObjectAddress {
     }
 
     /// Encode the IOA in little-endian using `size_of_ioa` bytes (1-3).
-    pub fn encode(&self, buf: &mut impl BufMut, size_of_ioa: u8) -> Result<()> {
+    pub fn encode(&self, buf: &mut impl BufMut, size_of_ioa: u8) -> Result<(), AduError> {
         let size = size_of_ioa as usize;
         if buf.remaining_mut() < size {
-            return Err(Error::BufferTooShort {
+            return Err(AduError::BufferTooShort {
                 need: size,
                 have: buf.remaining_mut(),
             });
@@ -39,10 +37,10 @@ impl InformationObjectAddress {
     }
 
     /// Decode the IOA from little-endian `size_of_ioa` bytes (1-3).
-    pub fn decode(buf: &mut impl Buf, size_of_ioa: u8) -> Result<Self> {
+    pub fn decode(buf: &mut impl Buf, size_of_ioa: u8) -> Result<Self, AduError> {
         let size = size_of_ioa as usize;
         if buf.remaining() < size {
-            return Err(Error::BufferTooShort {
+            return Err(AduError::BufferTooShort {
                 need: size,
                 have: buf.remaining(),
             });
@@ -54,9 +52,9 @@ impl InformationObjectAddress {
 }
 
 impl TryFrom<u32> for InformationObjectAddress {
-    type Error = Error;
+    type Error = IoaOverflow;
 
-    fn try_from(value: u32) -> Result<Self> {
+    fn try_from(value: u32) -> Result<Self, IoaOverflow> {
         Self::try_new(value)
     }
 }

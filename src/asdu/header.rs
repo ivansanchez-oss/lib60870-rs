@@ -1,6 +1,6 @@
 use bytes::{Buf, BufMut};
 
-use crate::error::{Error, Result};
+use crate::error::AduError;
 use crate::types::{AppLayerParameters, CauseOfTransmission, CommonAddress, OriginatorAddress, TypeId};
 
 /// ASDU header: type identification, variable structure qualifier, cause of
@@ -30,10 +30,10 @@ impl AsduHeader {
     }
 
     /// Decode an ASDU header from the buffer.
-    pub fn decode(buf: &mut impl Buf, params: &AppLayerParameters) -> Result<Self> {
+    pub fn decode(buf: &mut impl Buf, params: &AppLayerParameters) -> Result<Self, AduError> {
         let need = params.asdu_header_size();
         if buf.remaining() < need {
-            return Err(Error::BufferTooShort {
+            return Err(AduError::BufferTooShort {
                 need,
                 have: buf.remaining(),
             });
@@ -41,10 +41,8 @@ impl AsduHeader {
 
         // Type ID (1 byte)
         let type_id_raw = buf.get_u8();
-        let type_id = TypeId::try_from(type_id_raw).map_err(|_| Error::InvalidValue {
-            type_name: "TypeId",
-            value: type_id_raw,
-        })?;
+        let type_id = TypeId::try_from(type_id_raw)
+            .map_err(|_| AduError::InvalidTypeId(type_id_raw))?;
 
         // VSQ (1 byte): bit 7 = SQ, bits 0-6 = number of objects
         let vsq = buf.get_u8();
@@ -56,11 +54,8 @@ impl AsduHeader {
         let cause_raw = cot_byte0 & 0x3F;
         let is_negative = (cot_byte0 & 0x40) != 0;
         let is_test = (cot_byte0 & 0x80) != 0;
-        let cause =
-            CauseOfTransmission::try_from(cause_raw).map_err(|_| Error::InvalidValue {
-                type_name: "CauseOfTransmission",
-                value: cause_raw,
-            })?;
+        let cause = CauseOfTransmission::try_from(cause_raw)
+            .map_err(|_| AduError::InvalidCauseOfTransmission(cause_raw))?;
 
         // COT byte 1 (originator address, if size_of_cot == 2)
         let originator_address = if params.size_of_cot() >= 2 {
@@ -89,20 +84,17 @@ impl AsduHeader {
     }
 
     /// Encode the ASDU header into the buffer.
-    pub fn encode(&self, buf: &mut impl BufMut, params: &AppLayerParameters) -> Result<()> {
+    pub fn encode(&self, buf: &mut impl BufMut, params: &AppLayerParameters) -> Result<(), AduError> {
         let need = params.asdu_header_size();
         if buf.remaining_mut() < need {
-            return Err(Error::BufferTooShort {
+            return Err(AduError::BufferTooShort {
                 need,
                 have: buf.remaining_mut(),
             });
         }
 
         if self.num_objects > 127 {
-            return Err(Error::Encode(format!(
-                "num_objects {} exceeds maximum 127",
-                self.num_objects
-            )));
+            return Err(AduError::NumObjectsOverflow(self.num_objects));
         }
 
         // Type ID

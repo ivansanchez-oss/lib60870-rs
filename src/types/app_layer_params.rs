@@ -1,4 +1,4 @@
-use crate::error::{Error, Result};
+use crate::error::ConfigError;
 use crate::types::OriginatorAddress;
 
 /// Application layer parameters for ASDU encoding/decoding.
@@ -136,31 +136,22 @@ impl AppLayerParametersBuilder {
     /// - `size_of_ca`: 1 or 2
     /// - `size_of_ioa`: 1, 2, or 3
     /// - `max_asdu_length`: must be > header size
-    pub fn build(self) -> Result<AppLayerParameters> {
+    pub fn build(self) -> Result<AppLayerParameters, ConfigError> {
         if self.size_of_cot < 1 || self.size_of_cot > 2 {
-            return Err(Error::InvalidParameter(format!(
-                "size_of_cot must be 1 or 2, got {}",
-                self.size_of_cot
-            )));
+            return Err(ConfigError::InvalidSizeOfCot(self.size_of_cot));
         }
         if self.size_of_ca < 1 || self.size_of_ca > 2 {
-            return Err(Error::InvalidParameter(format!(
-                "size_of_ca must be 1 or 2, got {}",
-                self.size_of_ca
-            )));
+            return Err(ConfigError::InvalidSizeOfCa(self.size_of_ca));
         }
         if self.size_of_ioa < 1 || self.size_of_ioa > 3 {
-            return Err(Error::InvalidParameter(format!(
-                "size_of_ioa must be 1, 2, or 3, got {}",
-                self.size_of_ioa
-            )));
+            return Err(ConfigError::InvalidSizeOfIoa(self.size_of_ioa));
         }
         let min_length = 2 + self.size_of_cot as u16 + self.size_of_ca as u16;
         if self.max_asdu_length < min_length {
-            return Err(Error::InvalidParameter(format!(
-                "max_asdu_length ({}) must be >= header size ({})",
-                self.max_asdu_length, min_length
-            )));
+            return Err(ConfigError::MaxAsduLengthTooSmall {
+                max: self.max_asdu_length,
+                min: min_length,
+            });
         }
 
         Ok(AppLayerParameters {

@@ -1,4 +1,4 @@
-use crate::error::{Error, Result};
+use crate::error::AduError;
 use crate::types::{CauseOfTransmission, CommonAddress, OriginatorAddress};
 use crate::info::InformationObject;
 
@@ -55,20 +55,17 @@ impl AsduBuilder {
         mut self,
         ioa: impl Into<InformationObjectAddress>,
         object: InformationObject,
-    ) -> Result<Self> {
+    ) -> Result<Self, AduError> {
         if self.objects.len() >= 127 {
-            return Err(Error::Encode(
-                "ASDU cannot contain more than 127 objects".into(),
-            ));
+            return Err(AduError::TooManyObjects);
         }
 
         if let Some(first) = self.objects.first() {
             if first.value.type_id() != object.type_id() {
-                return Err(Error::Encode(format!(
-                    "type mismatch: expected {}, got {}",
-                    first.value.type_id(),
-                    object.type_id()
-                )));
+                return Err(AduError::TypeMismatch {
+                    expected: first.value.type_id().as_u8(),
+                    got: object.type_id().as_u8(),
+                });
             }
         }
 
@@ -80,9 +77,9 @@ impl AsduBuilder {
     }
 
     /// Build the ASDU. Fails if no objects have been added.
-    pub fn build(self) -> Result<Asdu> {
+    pub fn build(self) -> Result<Asdu, AduError> {
         if self.objects.is_empty() {
-            return Err(Error::Encode("ASDU must contain at least one object".into()));
+            return Err(AduError::EmptyAsdu);
         }
 
         let type_id = self.objects[0].value.type_id();

@@ -1,4 +1,7 @@
-use crate::error::Error;
+/// Error returned when a raw u8 doesn't map to a known TypeId.
+#[derive(Debug, thiserror::Error)]
+#[error("invalid type id: {0}")]
+pub struct InvalidTypeId(pub u8);
 
 /// IEC 60870-5 type identification field.
 ///
@@ -116,9 +119,9 @@ impl TypeId {
 }
 
 impl TryFrom<u8> for TypeId {
-    type Error = Error;
+    type Error = InvalidTypeId;
 
-    fn try_from(value: u8) -> Result<Self, Error> {
+    fn try_from(value: u8) -> Result<Self, InvalidTypeId> {
         match value {
             1 => Ok(Self::MSpNa1),
             2 => Ok(Self::MSpTa1),
@@ -201,10 +204,7 @@ impl TryFrom<u8> for TypeId {
             125 => Ok(Self::FSgNa1),
             126 => Ok(Self::FDrTa1),
             127 => Ok(Self::FScNb1),
-            _ => Err(Error::InvalidValue {
-                type_name: "TypeId",
-                value,
-            }),
+            _ => Err(InvalidTypeId(value)),
         }
     }
 }

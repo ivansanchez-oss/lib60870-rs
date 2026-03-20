@@ -10,7 +10,7 @@ pub mod system;
 
 use bytes::{Buf, BufMut};
 
-use crate::error::{Error, Result};
+use crate::error::AduError;
 use crate::types::{Cp56Time2a, TypeId};
 
 pub use traits::{Decode, Encode};
@@ -60,7 +60,7 @@ pub enum InformationObject {
 
 impl InformationObject {
     /// Decode the payload for a given TypeId.
-    pub fn decode(type_id: TypeId, buf: &mut impl Buf) -> Result<Self> {
+    pub fn decode(type_id: TypeId, buf: &mut impl Buf) -> Result<Self, AduError> {
         match type_id {
             // Single point
             TypeId::MSpNa1 => Ok(Self::SinglePoint(SinglePointInformation::decode(buf)?)),
@@ -118,7 +118,7 @@ impl InformationObject {
             TypeId::CRdNa1 => Ok(Self::Read(ReadCommand::decode(buf)?)),
             TypeId::CCsNa1 => Ok(Self::ClockSync(ClockSyncCommand::decode(buf)?)),
             TypeId::MEiNa1 => Ok(Self::EndOfInit(EndOfInitialization::decode(buf)?)),
-            _ => Err(Error::Decode(format!("unsupported type id: {type_id}"))),
+            _ => Err(AduError::UnsupportedTypeId(type_id.as_u8())),
         }
     }
 
@@ -148,7 +148,7 @@ impl InformationObject {
         }
     }
 
-    pub fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+    pub fn encode(&self, buf: &mut impl BufMut) -> Result<(), AduError> {
         match self {
             Self::SinglePoint(v) => v.encode(buf),
             Self::SinglePointCp56(v, t) => { v.encode(buf)?; encode_cp56(t, buf) }
@@ -199,9 +199,9 @@ impl InformationObject {
     }
 }
 
-fn decode_cp56(buf: &mut impl Buf) -> Result<Cp56Time2a> {
+fn decode_cp56(buf: &mut impl Buf) -> Result<Cp56Time2a, AduError> {
     if buf.remaining() < Cp56Time2a::ENCODED_SIZE {
-        return Err(Error::BufferTooShort {
+        return Err(AduError::BufferTooShort {
             need: Cp56Time2a::ENCODED_SIZE,
             have: buf.remaining(),
         });
@@ -211,9 +211,9 @@ fn decode_cp56(buf: &mut impl Buf) -> Result<Cp56Time2a> {
     Cp56Time2a::from_bytes(&bytes)
 }
 
-fn encode_cp56(time: &Cp56Time2a, buf: &mut impl BufMut) -> Result<()> {
+fn encode_cp56(time: &Cp56Time2a, buf: &mut impl BufMut) -> Result<(), AduError> {
     if buf.remaining_mut() < Cp56Time2a::ENCODED_SIZE {
-        return Err(Error::BufferTooShort {
+        return Err(AduError::BufferTooShort {
             need: Cp56Time2a::ENCODED_SIZE,
             have: buf.remaining_mut(),
         });
