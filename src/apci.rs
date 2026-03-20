@@ -1,4 +1,4 @@
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::error::FrameError;
@@ -58,58 +58,133 @@ pub enum Apdu {
     U(UFunction),
 }
 
-/// Read one APDU from the stream.
-pub async fn read_apdu(reader: &mut (impl AsyncRead + Unpin)) -> Result<Apdu, FrameError> {
-    let start = reader.read_u8().await?;
-    if start != START_BYTE {
-        return Err(FrameError::InvalidStartByte(start));
+/// Incremental APCI frame parser with a pre-allocated buffer.
+///
+/// Accumulates bytes from the transport and yields complete [`Apdu`] frames.
+/// Avoids per-frame allocation by reusing an internal `BytesMut`.
+pub struct FrameReader {
+    buf: BytesMut,
+}
+
+impl FrameReader {
+    /// Create a new reader with a pre-allocated buffer.
+    pub fn new() -> Self {
+        // 2 (header) + MAX_APDU_LENGTH is the largest possible frame
+        Self {
+            buf: BytesMut::with_capacity(2 + MAX_APDU_LENGTH),
+        }
     }
 
-    let length = reader.read_u8().await? as usize;
-    if length < CONTROL_FIELD_SIZE {
-        return Err(FrameError::LengthTooShort(length));
+    /// Read one APDU from the stream.
+    ///
+    /// Reads incrementally into an internal buffer. Returns the next
+    /// complete frame, or a `FrameError` on protocol/IO errors.
+    pub async fn read_frame(
+        &mut self,
+        reader: &mut (impl AsyncRead + Unpin),
+    ) -> Result<Apdu, FrameError> {
+        loop {
+            // Try to parse a complete frame from buffered data
+            if let Some(apdu) = self.try_parse()? {
+                return Ok(apdu);
+            }
+
+            // Need more data — read into the buffer
+            let n = reader.read_buf(&mut self.buf).await?;
+            if n == 0 {
+                return Err(FrameError::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "connection closed",
+                )));
+            }
+        }
     }
-    if length > MAX_APDU_LENGTH {
-        return Err(FrameError::LengthExceeded {
-            length,
-            max: MAX_APDU_LENGTH,
-        });
+
+    /// Try to parse one complete APDU from the buffer.
+    ///
+    /// Returns `Ok(None)` if there aren't enough bytes yet.
+    fn try_parse(&mut self) -> Result<Option<Apdu>, FrameError> {
+        if self.buf.remaining() < 2 {
+            return Ok(None);
+        }
+
+        let start = self.buf[0];
+        if start != START_BYTE {
+            // Consume the bad byte and report the error
+            self.buf.advance(1);
+            return Err(FrameError::InvalidStartByte(start));
+        }
+
+        let length = self.buf[1] as usize;
+        if length < CONTROL_FIELD_SIZE {
+            // Consume both header bytes
+            self.buf.advance(2);
+            return Err(FrameError::LengthTooShort(length));
+        }
+        if length > MAX_APDU_LENGTH {
+            self.buf.advance(2);
+            return Err(FrameError::LengthExceeded {
+                length,
+                max: MAX_APDU_LENGTH,
+            });
+        }
+
+        // Check if we have the full frame body
+        let frame_size = 2 + length;
+        if self.buf.remaining() < frame_size {
+            return Ok(None);
+        }
+
+        // Consume header
+        self.buf.advance(2);
+
+        // Parse control field
+        let cf1 = self.buf[0];
+        let cf2 = self.buf[1];
+        let cf3 = self.buf[2];
+        let cf4 = self.buf[3];
+
+        let apdu = if cf1 & 0x01 == 0 {
+            // I-frame
+            let send_seq = (u16::from(cf1) | (u16::from(cf2) << 8)) >> 1;
+            let recv_seq = (u16::from(cf3) | (u16::from(cf4) << 8)) >> 1;
+            self.buf.advance(CONTROL_FIELD_SIZE);
+            let payload = self.buf.split_to(length - CONTROL_FIELD_SIZE).freeze();
+            Apdu::I {
+                send_seq,
+                recv_seq,
+                payload,
+            }
+        } else if cf1 & 0x03 == 0x01 {
+            // S-frame
+            let recv_seq = (u16::from(cf3) | (u16::from(cf4) << 8)) >> 1;
+            self.buf.advance(length);
+            Apdu::S { recv_seq }
+        } else if cf1 & 0x03 == 0x03 {
+            // U-frame
+            let func = UFunction::from_byte(cf1).ok_or(FrameError::UnknownUFunction(cf1))?;
+            self.buf.advance(length);
+            Apdu::U(func)
+        } else {
+            self.buf.advance(length);
+            return Err(FrameError::InvalidControlField(cf1));
+        };
+
+        Ok(Some(apdu))
     }
+}
 
-    let mut buf = vec![0u8; length];
-    reader.read_exact(&mut buf).await?;
-
-    let cf1 = buf[0];
-    let cf2 = buf[1];
-    let cf3 = buf[2];
-    let cf4 = buf[3];
-
-    if cf1 & 0x01 == 0 {
-        // I-frame
-        let send_seq = (u16::from(cf1) | (u16::from(cf2) << 8)) >> 1;
-        let recv_seq = (u16::from(cf3) | (u16::from(cf4) << 8)) >> 1;
-        let payload = Bytes::copy_from_slice(&buf[4..]);
-        Ok(Apdu::I {
-            send_seq,
-            recv_seq,
-            payload,
-        })
-    } else if cf1 & 0x03 == 0x01 {
-        // S-frame
-        let recv_seq = (u16::from(cf3) | (u16::from(cf4) << 8)) >> 1;
-        Ok(Apdu::S { recv_seq })
-    } else if cf1 & 0x03 == 0x03 {
-        // U-frame
-        UFunction::from_byte(cf1)
-            .map(Apdu::U)
-            .ok_or(FrameError::UnknownUFunction(cf1))
-    } else {
-        Err(FrameError::InvalidControlField(cf1))
+impl Default for FrameReader {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 /// Write one APDU to the stream.
-pub async fn write_apdu(writer: &mut (impl AsyncWrite + Unpin), apdu: &Apdu) -> Result<(), FrameError> {
+pub async fn write_apdu(
+    writer: &mut (impl AsyncWrite + Unpin),
+    apdu: &Apdu,
+) -> Result<(), FrameError> {
     match apdu {
         Apdu::I {
             send_seq,
@@ -148,6 +223,13 @@ mod tests {
     use super::*;
     use tokio::io::duplex;
 
+    async fn write_and_read(apdu: &Apdu) -> Apdu {
+        let (mut client, mut server) = duplex(256);
+        write_apdu(&mut client, apdu).await.unwrap();
+        let mut reader = FrameReader::new();
+        reader.read_frame(&mut server).await.unwrap()
+    }
+
     #[tokio::test]
     async fn roundtrip_u_frame() {
         for func in [
@@ -158,48 +240,36 @@ mod tests {
             UFunction::TestFrAct,
             UFunction::TestFrCon,
         ] {
-            let (mut client, mut server) = duplex(64);
-            write_apdu(&mut client, &Apdu::U(func)).await.unwrap();
-            let frame = read_apdu(&mut server).await.unwrap();
-            assert_eq!(frame, Apdu::U(func));
+            let decoded = write_and_read(&Apdu::U(func)).await;
+            assert_eq!(decoded, Apdu::U(func));
         }
     }
 
     #[tokio::test]
     async fn roundtrip_s_frame() {
-        let (mut client, mut server) = duplex(64);
         let apdu = Apdu::S { recv_seq: 1234 };
-        write_apdu(&mut client, &apdu).await.unwrap();
-        let decoded = read_apdu(&mut server).await.unwrap();
-        assert_eq!(decoded, apdu);
+        assert_eq!(write_and_read(&apdu).await, apdu);
     }
 
     #[tokio::test]
     async fn roundtrip_i_frame() {
-        let (mut client, mut server) = duplex(256);
         let payload = Bytes::from_static(&[0x01, 0x02, 0x03, 0x04, 0x05]);
         let apdu = Apdu::I {
             send_seq: 100,
             recv_seq: 50,
             payload: payload.clone(),
         };
-        write_apdu(&mut client, &apdu).await.unwrap();
-        let decoded = read_apdu(&mut server).await.unwrap();
-        assert_eq!(decoded, apdu);
+        assert_eq!(write_and_read(&apdu).await, apdu);
     }
 
     #[tokio::test]
     async fn roundtrip_max_sequence_numbers() {
-        let (mut client, mut server) = duplex(256);
-        // Max sequence number is 32767 (15 bits)
         let apdu = Apdu::I {
             send_seq: 32767,
             recv_seq: 32767,
             payload: Bytes::from_static(&[0xFF]),
         };
-        write_apdu(&mut client, &apdu).await.unwrap();
-        let decoded = read_apdu(&mut server).await.unwrap();
-        assert_eq!(decoded, apdu);
+        assert_eq!(write_and_read(&apdu).await, apdu);
     }
 
     #[tokio::test]
@@ -210,7 +280,42 @@ mod tests {
             .await
             .unwrap();
         client.flush().await.unwrap();
-        let err = read_apdu(&mut server).await.unwrap_err();
+        let mut reader = FrameReader::new();
+        let err = reader.read_frame(&mut server).await.unwrap_err();
         assert!(matches!(err, FrameError::InvalidStartByte(0x99)));
+    }
+
+    #[tokio::test]
+    async fn multiple_frames_in_buffer() {
+        let (mut client, mut server) = duplex(256);
+        // Write two U-frames back to back
+        write_apdu(&mut client, &Apdu::U(UFunction::TestFrAct))
+            .await
+            .unwrap();
+        write_apdu(&mut client, &Apdu::U(UFunction::TestFrCon))
+            .await
+            .unwrap();
+
+        let mut reader = FrameReader::new();
+        let f1 = reader.read_frame(&mut server).await.unwrap();
+        let f2 = reader.read_frame(&mut server).await.unwrap();
+        assert_eq!(f1, Apdu::U(UFunction::TestFrAct));
+        assert_eq!(f2, Apdu::U(UFunction::TestFrCon));
+    }
+
+    #[tokio::test]
+    async fn try_parse_returns_none_on_empty() {
+        let mut reader = FrameReader::new();
+        assert!(reader.try_parse().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn try_parse_returns_none_on_partial() {
+        let mut reader = FrameReader::new();
+        // Only the start byte and length, but not the full body
+        reader.buf.extend_from_slice(&[START_BYTE, 0x04]);
+        assert!(reader.try_parse().unwrap().is_none());
+        // Data still in buffer for next read
+        assert_eq!(reader.buf.len(), 2);
     }
 }

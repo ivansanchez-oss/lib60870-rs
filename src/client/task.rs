@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use tokio::time::{self, Instant};
 use tracing::{debug, info, warn};
 
-use crate::apci::{self, Apdu, UFunction};
+use crate::apci::{self, Apdu, FrameReader, UFunction};
 use crate::asdu::Asdu;
 use crate::error::RequestError;
 use crate::transport::{connect_with_retry, Connector, PhysLayer};
@@ -129,11 +129,13 @@ async fn run_session<H: ClientHandler>(
     commands: &mut mpsc::Receiver<ClientCommand>,
     phys: PhysLayer,
 ) -> Result<SessionEnd, RequestError> {
-    let (mut reader, mut writer) = tokio::io::split(phys);
+    let (reader, mut writer) = tokio::io::split(phys);
+    let mut frame_reader = FrameReader::new();
+    let mut reader = reader;
 
     loop {
         // Wait for user to send STARTDT
-        if let Some(end) = wait_for_start_dt(config, commands, &mut reader, &mut writer).await? {
+        if let Some(end) = wait_for_start_dt(config, commands, &mut frame_reader, &mut reader, &mut writer).await? {
             return Ok(end);
         }
 
@@ -144,6 +146,7 @@ async fn run_session<H: ClientHandler>(
             handler,
             param,
             commands,
+            &mut frame_reader,
             &mut reader,
             &mut writer,
             &mut state,
@@ -178,12 +181,13 @@ enum DataTransferEnd {
 async fn wait_for_start_dt(
     config: &ClientConfig,
     commands: &mut mpsc::Receiver<ClientCommand>,
+    frame_reader: &mut FrameReader,
     reader: &mut ReadHalf<PhysLayer>,
     writer: &mut WriteHalf<PhysLayer>,
 ) -> Result<Option<SessionEnd>, RequestError> {
     loop {
         tokio::select! {
-            frame_result = apci::read_apdu(reader) => {
+            frame_result = frame_reader.read_frame(reader) => {
                 let frame = frame_result?;
                 match frame {
                     Apdu::U(UFunction::TestFrAct) => {
@@ -204,7 +208,7 @@ async fn wait_for_start_dt(
                     Some(ClientCommand::StartDt { response }) => {
                         apci::write_apdu(writer, &Apdu::U(UFunction::StartDtAct)).await?;
 
-                        let result = time::timeout(config.apci.t0(), apci::read_apdu(reader))
+                        let result = time::timeout(config.apci.t0(), frame_reader.read_frame(reader))
                             .await
                             .map_err(|_| RequestError::Timeout("STARTDT con timeout (t0)"))?;
 
@@ -243,6 +247,7 @@ async fn run_data_transfer<H: ClientHandler>(
     handler: &mut H,
     param: &mut H::Param,
     commands: &mut mpsc::Receiver<ClientCommand>,
+    frame_reader: &mut FrameReader,
     reader: &mut ReadHalf<PhysLayer>,
     writer: &mut WriteHalf<PhysLayer>,
     state: &mut SessionState,
@@ -254,7 +259,7 @@ async fn run_data_transfer<H: ClientHandler>(
 
         tokio::select! {
             // --- Incoming frame ---
-            frame_result = apci::read_apdu(reader) => {
+            frame_result = frame_reader.read_frame(reader) => {
                 let frame = frame_result?;
                 state.last_rx = Instant::now();
 
@@ -326,7 +331,7 @@ async fn run_data_transfer<H: ClientHandler>(
                             return Ok(DataTransferEnd::Disconnected);
                         }
                         // Wait for STOPDT con within t0
-                        match time::timeout(config.apci.t0(), apci::read_apdu(reader)).await {
+                        match time::timeout(config.apci.t0(), frame_reader.read_frame(reader)).await {
                             Ok(Ok(Apdu::U(UFunction::StopDtCon))) => {
                                 info!("STOPDT confirmed");
                                 let _ = response.send(Ok(()));
