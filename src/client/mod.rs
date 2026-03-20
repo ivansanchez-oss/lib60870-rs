@@ -80,16 +80,46 @@ pub struct ClientHandle {
     connected: Arc<AtomicBool>,
 }
 
+/// A one-shot callback that guarantees the caller always receives a response.
+///
+/// If the `Promise` is dropped without calling [`complete`](Promise::complete),
+/// the `Drop` impl automatically sends `Err(RequestError::Shutdown)`, preventing
+/// the receiver from hanging indefinitely (e.g. on task panic or early return).
+pub(crate) struct Promise<T> {
+    inner: Option<oneshot::Sender<Result<T, RequestError>>>,
+}
+
+impl<T> Promise<T> {
+    pub fn new() -> (Self, oneshot::Receiver<Result<T, RequestError>>) {
+        let (tx, rx) = oneshot::channel();
+        (Self { inner: Some(tx) }, rx)
+    }
+
+    pub fn complete(mut self, value: Result<T, RequestError>) {
+        if let Some(tx) = self.inner.take() {
+            let _ = tx.send(value);
+        }
+    }
+}
+
+impl<T> Drop for Promise<T> {
+    fn drop(&mut self) {
+        if let Some(tx) = self.inner.take() {
+            let _ = tx.send(Err(RequestError::Shutdown));
+        }
+    }
+}
+
 pub(crate) enum ClientCommand {
     StartDt {
-        response: oneshot::Sender<Result<(), RequestError>>,
+        promise: Promise<()>,
     },
     StopDt {
-        response: oneshot::Sender<Result<(), RequestError>>,
+        promise: Promise<()>,
     },
     SendAsdu {
         asdu: Asdu,
-        response: oneshot::Sender<Result<(), RequestError>>,
+        promise: Promise<()>,
     },
     Shutdown {
         response: oneshot::Sender<()>,
@@ -106,12 +136,12 @@ impl ClientHandle {
     ///
     /// Must be called after the transport connects before sending any ASDUs.
     pub async fn start_dt(&self) -> Result<(), RequestError> {
-        let (tx, rx) = oneshot::channel();
+        let (promise, rx) = Promise::new();
         self.tx
-            .send(ClientCommand::StartDt { response: tx })
+            .send(ClientCommand::StartDt { promise })
             .await
             .map_err(|_| RequestError::TaskClosed)?;
-        rx.await.map_err(|_| RequestError::TaskClosed)?
+        rx.await.map_err(|_| RequestError::Shutdown)?
     }
 
     /// Send STOPDT activation to pause data transfer.
@@ -119,12 +149,12 @@ impl ClientHandle {
     /// After this, the connection remains open but no I-frames are exchanged
     /// until [`start_dt()`](ClientHandle::start_dt) is called again.
     pub async fn stop_dt(&self) -> Result<(), RequestError> {
-        let (tx, rx) = oneshot::channel();
+        let (promise, rx) = Promise::new();
         self.tx
-            .send(ClientCommand::StopDt { response: tx })
+            .send(ClientCommand::StopDt { promise })
             .await
             .map_err(|_| RequestError::TaskClosed)?;
-        rx.await.map_err(|_| RequestError::TaskClosed)?
+        rx.await.map_err(|_| RequestError::Shutdown)?
     }
 
     /// Send a station interrogation command.
@@ -189,12 +219,12 @@ impl ClientHandle {
         if !self.connected.load(Ordering::Acquire) {
             return Err(RequestError::NotConnected);
         }
-        let (tx, rx) = oneshot::channel();
+        let (promise, rx) = Promise::new();
         self.tx
-            .send(ClientCommand::SendAsdu { asdu, response: tx })
+            .send(ClientCommand::SendAsdu { asdu, promise })
             .await
             .map_err(|_| RequestError::TaskClosed)?;
-        rx.await.map_err(|_| RequestError::TaskClosed)?
+        rx.await.map_err(|_| RequestError::Shutdown)?
     }
 }
 

@@ -205,7 +205,7 @@ async fn wait_for_start_dt(
 
             cmd = commands.recv() => {
                 match cmd {
-                    Some(ClientCommand::StartDt { response }) => {
+                    Some(ClientCommand::StartDt { promise }) => {
                         apci::write_apdu(writer, &Apdu::U(UFunction::StartDtAct)).await?;
 
                         let result = time::timeout(config.apci.t0(), frame_reader.read_frame(reader))
@@ -215,21 +215,21 @@ async fn wait_for_start_dt(
                         match result? {
                             Apdu::U(UFunction::StartDtCon) => {
                                 info!("STARTDT confirmed");
-                                let _ = response.send(Ok(()));
+                                let _ = promise.complete(Ok(()));
                                 return Ok(None);
                             }
                             other => {
                                 let msg = format!("expected STARTDT con, got {:?}", other);
-                                let _ = response.send(Err(RequestError::UnexpectedResponse(msg.clone())));
+                                let _ = promise.complete(Err(RequestError::UnexpectedResponse(msg.clone())));
                                 return Err(RequestError::UnexpectedResponse(msg));
                             }
                         }
                     }
-                    Some(ClientCommand::StopDt { response }) => {
-                        let _ = response.send(Err(RequestError::NotActive));
+                    Some(ClientCommand::StopDt { promise }) => {
+                        let _ = promise.complete(Err(RequestError::NotActive));
                     }
-                    Some(ClientCommand::SendAsdu { response, .. }) => {
-                        let _ = response.send(Err(RequestError::NotConnected));
+                    Some(ClientCommand::SendAsdu { promise, .. }) => {
+                        let _ = promise.complete(Err(RequestError::NotConnected));
                     }
                     Some(ClientCommand::Shutdown { response }) => {
                         let _ = response.send(());
@@ -321,41 +321,41 @@ async fn run_data_transfer<H: ClientHandler>(
             // --- User command ---
             cmd = commands.recv() => {
                 match cmd {
-                    Some(ClientCommand::StartDt { response }) => {
-                        let _ = response.send(Err(RequestError::AlreadyActive));
+                    Some(ClientCommand::StartDt { promise }) => {
+                        let _ = promise.complete(Err(RequestError::AlreadyActive));
                     }
-                    Some(ClientCommand::StopDt { response }) => {
+                    Some(ClientCommand::StopDt { promise }) => {
                         let result = apci::write_apdu(writer, &Apdu::U(UFunction::StopDtAct)).await;
                         if let Err(e) = result {
-                            let _ = response.send(Err(e.into()));
+                            let _ = promise.complete(Err(e.into()));
                             return Ok(DataTransferEnd::Disconnected);
                         }
                         // Wait for STOPDT con within t0
                         match time::timeout(config.apci.t0(), frame_reader.read_frame(reader)).await {
                             Ok(Ok(Apdu::U(UFunction::StopDtCon))) => {
                                 info!("STOPDT confirmed");
-                                let _ = response.send(Ok(()));
+                                let _ = promise.complete(Ok(()));
                                 return Ok(DataTransferEnd::Stopped);
                             }
                             Ok(Ok(other)) => {
                                 let msg = format!("expected STOPDT con, got {:?}", other);
-                                let _ = response.send(Err(RequestError::UnexpectedResponse(msg.clone())));
+                                let _ = promise.complete(Err(RequestError::UnexpectedResponse(msg.clone())));
                                 return Err(RequestError::UnexpectedResponse(msg));
                             }
                             Ok(Err(e)) => {
                                 let err = RequestError::from(e);
-                                let _ = response.send(Err(RequestError::NotConnected));
+                                let _ = promise.complete(Err(RequestError::NotConnected));
                                 return Err(err);
                             }
                             Err(_) => {
-                                let _ = response.send(Err(RequestError::Timeout("STOPDT con timeout (t0)")));
+                                let _ = promise.complete(Err(RequestError::Timeout("STOPDT con timeout (t0)")));
                                 return Err(RequestError::Timeout("STOPDT con timeout (t0)"));
                             }
                         }
                     }
-                    Some(ClientCommand::SendAsdu { asdu, response }) => {
+                    Some(ClientCommand::SendAsdu { asdu, promise }) => {
                         let result = send_i_frame(config, writer, state, &asdu).await;
-                        let _ = response.send(result);
+                        let _ = promise.complete(result);
                     }
                     Some(ClientCommand::Shutdown { response }) => {
                         let _ = apci::write_apdu(writer, &Apdu::U(UFunction::StopDtAct)).await;
@@ -435,11 +435,11 @@ async fn send_s_frame(
 fn drain_pending_commands(commands: &mut mpsc::Receiver<ClientCommand>) {
     while let Ok(cmd) = commands.try_recv() {
         match cmd {
-            ClientCommand::StartDt { response } | ClientCommand::StopDt { response } => {
-                let _ = response.send(Err(RequestError::NotConnected));
+            ClientCommand::StartDt { promise } | ClientCommand::StopDt { promise } => {
+                let _ = promise.complete(Err(RequestError::NotConnected));
             }
-            ClientCommand::SendAsdu { response, .. } => {
-                let _ = response.send(Err(RequestError::NotConnected));
+            ClientCommand::SendAsdu { promise, .. } => {
+                let _ = promise.complete(Err(RequestError::NotConnected));
             }
             ClientCommand::Shutdown { response } => {
                 let _ = response.send(());
