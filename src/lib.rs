@@ -4,5 +4,6 @@ pub mod client;
 pub mod error;
 pub mod ft12;
 pub mod info;
+pub mod server;
 pub mod transport;
 pub mod types;
